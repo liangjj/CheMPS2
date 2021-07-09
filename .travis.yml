@@ -1,0 +1,37 @@
+language: cpp
+os: linux
+dist: bionic
+
+addons:
+  apt:
+    sources:
+        - ubuntu-toolchain-r-test
+    packages:
+        - cmake
+        - cmake-data
+        - liblapack-dev
+        - libhdf5-serial-dev
+        - g++-9
+        - gcc-9
+        - clang
+env:
+    global:
+    # should be limited to 4 on travis
+    - OMP_NUM_THREADS=4
+    # make cmake verbose
+    - VERBOSE=1
+    matrix:
+    # test two different compilers
+    - MATRIX_EVAL="CXX=clang++ && CC=clang"
+    - MATRIX_EVAL="CXX=g++-9 && CC=gcc-9"
+before_install:
+    - eval "${MATRIX_EVAL}"
+    - if [[ $CXX == "clang++" ]]; then export LD_LIBRARY_PATH=/usr/local/clang/lib:$LD_LIBRARY_PATH; fi
+install:
+    - mkdir build
+    - cd build
+    - cmake -DCMAKE_BUILD_TYPE=Release ..
+    - make
+script:
+    # we put a timeout of 90 minutes
+    - travis_wait 90 make test ARGS="-V"

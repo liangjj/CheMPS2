@@ -1,18 +1,11 @@
-include_directories (${CheMPS2_SOURCE_DIR}/CheMPS2/include/)
+file (MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/tests/tests)
 
-link_directories (${CheMPS2_BINARY_DIR}/CheMPS2)
+set (TESTLIST "test1" "test2" "test3" "test4" "test5" "test6" "test7" "test8" "test9" "test10" "test11" "test12" "test13" "test14")
 
-add_executable (test1 test1.cpp)
-add_executable (test2 test2.cpp)
-add_executable (test3 test3.cpp)
-add_executable (test4 test4.cpp)
-add_executable (test5 test5.cpp)
-add_executable (test6 test6.cpp)
-
-target_link_libraries (test1 CheMPS2)
-target_link_libraries (test2 CheMPS2)
-target_link_libraries (test3 CheMPS2)
-target_link_libraries (test4 CheMPS2)
-target_link_libraries (test5 CheMPS2)
-target_link_libraries (test6 CheMPS2)
+foreach (ITEM ${TESTLIST})
+    configure_file (${CMAKE_SOURCE_DIR}/tests/${ITEM}.cpp.in ${CMAKE_BINARY_DIR}/tests/tests/${ITEM}.cpp)
+    add_executable (${ITEM} ${CMAKE_BINARY_DIR}/tests/tests/${ITEM}.cpp)
+    target_link_libraries (${ITEM} chemps2-lib)
+    add_test (${ITEM} ${ITEM})
+endforeach()
 

@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013 Sebastian Wouters
+   Copyright (C) 2013-2018 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,7 +22,8 @@
 
 #include "Heff.h"
 #include "Lapack.h"
-#include "Gsl.h"
+#include "MPIchemps2.h"
+#include "Wigner.h"
 
 void CheMPS2::Heff::addDiagram3Aand3D(const int ikappa, double * memS, double * memHeff, const Sobject * denS, TensorQ * Qleft, TensorL ** Lleft, double * temp) const{
 
@@ -37,7 +38,7 @@ void CheMPS2::Heff::addDiagram3Aand3D(const int ikappa, double * memS, double * 
    int IR = denS->gIR(ikappa);
    
    int theindex = denS->gIndex();
-   int ILdown = denBK->directProd(IL,denBK->gIrrep(theindex));
+   int ILdown = Irreps::directProd(IL,denBK->gIrrep(theindex));
    int TwoS2 = (N2==1)?1:0;
    
    int dimR = denBK->gCurrentDim(theindex+2,NR,TwoSR,IR);
@@ -56,7 +57,7 @@ void CheMPS2::Heff::addDiagram3Aand3D(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL+1,TwoSLdown,ILdown,1,N2,TwoJdown,NR,TwoSR,IR);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSL+TwoSR+2+TwoS2);
-                     double factor = sqrt((TwoJdown+1)*(TwoSLdown+1.0))*fase*gsl_sf_coupling_6j(TwoJdown,TwoS2,1,TwoSL,TwoSLdown,TwoSR);
+                     double factor = sqrt((TwoJdown+1)*(TwoSLdown+1.0))*fase*Wigner::wigner6j(TwoJdown,TwoS2,1,TwoSL,TwoSLdown,TwoSR);
                      double beta = 1.0; //add
                      char notr = 'N';
                   
@@ -88,7 +89,7 @@ void CheMPS2::Heff::addDiagram3Aand3D(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL+1,TwoSLdown,ILdown,0,N2,TwoS2,NR,TwoSR,IR);
             if (memSkappa!=-1){
                int fase = phase(TwoSL+TwoSR+1+TwoS2);
-               double factor = sqrt((TwoSLdown+1)*(TwoJ+1.0))*fase*gsl_sf_coupling_6j(TwoS2,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
+               double factor = sqrt((TwoSLdown+1)*(TwoJ+1.0))*fase*Wigner::wigner6j(TwoS2,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
                double beta = 1.0;
                char notr = 'N';
                double * BlockQ = Qleft->gStorage(NL,TwoSL,IL,NL+1,TwoSLdown,ILdown);
@@ -111,7 +112,7 @@ void CheMPS2::Heff::addDiagram3Aand3D(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL-1,TwoSLdown,ILdown,1,N2,TwoJdown,NR,TwoSR,IR);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSLdown+TwoSR+1+TwoS2);
-                     double factor = fase*sqrt((TwoSL+1)*(TwoJdown+1.0))*gsl_sf_coupling_6j(TwoJdown,TwoS2,1,TwoSL,TwoSLdown,TwoSR);
+                     double factor = fase*sqrt((TwoSL+1)*(TwoJdown+1.0))*Wigner::wigner6j(TwoJdown,TwoS2,1,TwoSL,TwoSLdown,TwoSR);
                      double beta = 1.0;
                      char notr = 'N';
                      char trans = 'T';
@@ -131,7 +132,7 @@ void CheMPS2::Heff::addDiagram3Aand3D(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL-1,TwoSLdown,ILdown,2,N2,TwoS2,NR,TwoSR,IR);
             if (memSkappa!=-1){
                int fase = phase(TwoSLdown+TwoSR+2+TwoS2);
-               double factor = fase*sqrt((TwoSL+1)*(TwoJ+1.0))*gsl_sf_coupling_6j(TwoS2,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
+               double factor = fase*sqrt((TwoSL+1)*(TwoJ+1.0))*Wigner::wigner6j(TwoS2,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
                double beta = 1.0;
                char notr = 'N';
                char trans = 'T';
@@ -170,7 +171,7 @@ void CheMPS2::Heff::addDiagram3Band3I(const int ikappa, double * memS, double * 
    int IR = denS->gIR(ikappa);
    
    int theindex = denS->gIndex();
-   int ILdown = denBK->directProd(IL,denBK->gIrrep(theindex+1));
+   int ILdown = Irreps::directProd(IL,denBK->gIrrep(theindex+1));
    int TwoS1 = (N1==1)?1:0;
    
    int dimR = denBK->gCurrentDim(theindex+2,NR,TwoSR,IR);
@@ -189,7 +190,7 @@ void CheMPS2::Heff::addDiagram3Band3I(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL+1,TwoSLdown,ILdown,N1,1,TwoJdown,NR,TwoSR,IR);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSL+TwoSR+3-TwoJdown);
-                     double factor = sqrt((TwoJdown+1)*(TwoSLdown+1.0))*fase*gsl_sf_coupling_6j(TwoJdown,TwoS1,1,TwoSL,TwoSLdown,TwoSR);
+                     double factor = sqrt((TwoJdown+1)*(TwoSLdown+1.0))*fase*Wigner::wigner6j(TwoJdown,TwoS1,1,TwoSL,TwoSLdown,TwoSR);
                      double beta = 1.0; //add
                      char notr = 'N';
                   
@@ -221,7 +222,7 @@ void CheMPS2::Heff::addDiagram3Band3I(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL+1,TwoSLdown,ILdown,N1,0,TwoS1,NR,TwoSR,IR);
             if (memSkappa!=-1){
                int fase = phase(TwoSL+TwoSR+2-TwoJ);
-               double factor = sqrt((TwoSLdown+1)*(TwoJ+1.0))*fase*gsl_sf_coupling_6j(TwoS1,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
+               double factor = sqrt((TwoSLdown+1)*(TwoJ+1.0))*fase*Wigner::wigner6j(TwoS1,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
                double beta = 1.0;
                char notr = 'N';
                double * BlockQ = Qleft->gStorage(NL,TwoSL,IL,NL+1,TwoSLdown,ILdown);
@@ -244,7 +245,7 @@ void CheMPS2::Heff::addDiagram3Band3I(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL-1,TwoSLdown,ILdown,N1,1,TwoJdown,NR,TwoSR,IR);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSLdown+TwoSR+2-TwoJdown);
-                     double factor = fase*sqrt((TwoSL+1)*(TwoJdown+1.0))*gsl_sf_coupling_6j(TwoJdown,TwoS1,1,TwoSL,TwoSLdown,TwoSR);
+                     double factor = fase*sqrt((TwoSL+1)*(TwoJdown+1.0))*Wigner::wigner6j(TwoJdown,TwoS1,1,TwoSL,TwoSLdown,TwoSR);
                      double beta = 1.0;
                      char notr = 'N';
                      char trans = 'T';
@@ -264,7 +265,7 @@ void CheMPS2::Heff::addDiagram3Band3I(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL-1,TwoSLdown,ILdown,N1,2,TwoS1,NR,TwoSR,IR);
             if (memSkappa!=-1){
                int fase = phase(TwoSLdown+TwoSR+3-TwoJ);
-               double factor = fase*sqrt((TwoSL+1)*(TwoJ+1.0))*gsl_sf_coupling_6j(TwoS1,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
+               double factor = fase*sqrt((TwoSL+1)*(TwoJ+1.0))*Wigner::wigner6j(TwoS1,TwoJ,1,TwoSL,TwoSLdown,TwoSR);
                double beta = 1.0;
                char notr = 'N';
                char trans = 'T';
@@ -292,6 +293,10 @@ void CheMPS2::Heff::addDiagram3Band3I(const int ikappa, double * memS, double * 
 
 void CheMPS2::Heff::addDiagram3C(const int ikappa, double * memS, double * memHeff, const Sobject * denS, TensorQ ** Qleft, TensorL ** Lright, double * temp) const{
 
+   #ifdef CHEMPS2_MPI_COMPILATION
+   const int MPIRANK = MPIchemps2::mpi_rank();
+   #endif
+
    int NL = denS->gNL(ikappa);
    int TwoSL = denS->gTwoSL(ikappa);
    int IL = denS->gIL(ikappa);
@@ -313,29 +318,35 @@ void CheMPS2::Heff::addDiagram3C(const int ikappa, double * memS, double * memHe
          if ((abs(TwoSLdown-TwoSRdown)<=TwoJ) && (TwoSLdown>=0) && (TwoSRdown>=0)){
       
             int fase = phase(TwoSLdown+TwoSR+TwoJ+1 + ((N1==1)?2:0) + ((N2==1)?2:0) );
-            const double factor = fase * sqrt((TwoSLdown+1)*(TwoSRdown+1.0)) * gsl_sf_coupling_6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
+            const double factor = fase * sqrt((TwoSLdown+1)*(TwoSRdown+1.0)) * Wigner::wigner6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
       
             for (int l_index=theindex+2; l_index<Prob->gL(); l_index++){
-               int ILdown = denBK->directProd(IL,denBK->gIrrep(l_index));
-               int IRdown = denBK->directProd(IR,denBK->gIrrep(l_index));
-               int memSkappa = denS->gKappa(NL+1, TwoSLdown, ILdown, N1, N2, TwoJ, NR+1, TwoSRdown, IRdown);
-               if (memSkappa!=-1){
-                  int dimRdown = denBK->gCurrentDim(theindex+2, NR+1, TwoSRdown, IRdown);
-                  int dimLdown = denBK->gCurrentDim(theindex,   NL+1, TwoSLdown, ILdown);
-               
-                  double * Qblock = Qleft[ l_index-theindex  ]->gStorage(NL,TwoSL,IL,NL+1,TwoSLdown,ILdown);
-                  double * Lblock = Lright[l_index-theindex-2]->gStorage(NR,TwoSR,IR,NR+1,TwoSRdown,IRdown);
-               
-                  char trans = 'T';
-                  char notra = 'N';
-                  double beta = 0.0; //set
-                  double alpha = factor;
-                  dgemm_(&notra,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Qblock,&dimLup,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
-               
-                  beta = 1.0; //add
-                  alpha = 1.0;
-                  dgemm_(&notra,&trans,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Lblock,&dimRup,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
-               
+            
+               #ifdef CHEMPS2_MPI_COMPILATION
+               if ( MPIchemps2::owner_q( Prob->gL(), l_index ) == MPIRANK )
+               #endif
+               {
+                  int ILdown = Irreps::directProd(IL,denBK->gIrrep(l_index));
+                  int IRdown = Irreps::directProd(IR,denBK->gIrrep(l_index));
+                  int memSkappa = denS->gKappa(NL+1, TwoSLdown, ILdown, N1, N2, TwoJ, NR+1, TwoSRdown, IRdown);
+                  if (memSkappa!=-1){
+                     int dimRdown = denBK->gCurrentDim(theindex+2, NR+1, TwoSRdown, IRdown);
+                     int dimLdown = denBK->gCurrentDim(theindex,   NL+1, TwoSLdown, ILdown);
+                  
+                     double * Qblock = Qleft[ l_index-theindex  ]->gStorage(NL,TwoSL,IL,NL+1,TwoSLdown,ILdown);
+                     double * Lblock = Lright[l_index-theindex-2]->gStorage(NR,TwoSR,IR,NR+1,TwoSRdown,IRdown);
+                  
+                     char trans = 'T';
+                     char notra = 'N';
+                     double beta = 0.0; //set
+                     double alpha = factor;
+                     dgemm_(&notra,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Qblock,&dimLup,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
+                  
+                     beta = 1.0; //add
+                     alpha = 1.0;
+                     dgemm_(&notra,&trans,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Lblock,&dimRup,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
+                  
+                  }
                }
             }
          }
@@ -348,29 +359,35 @@ void CheMPS2::Heff::addDiagram3C(const int ikappa, double * memS, double * memHe
          if ((abs(TwoSLdown-TwoSRdown)<=TwoJ) && (TwoSLdown>=0) && (TwoSRdown>=0)){
       
             int fase = phase(TwoSL+TwoSRdown+TwoJ+1 + ((N1==1)?2:0) + ((N2==1)?2:0) );
-            const double factor = fase * sqrt((TwoSL+1)*(TwoSR+1.0)) * gsl_sf_coupling_6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
+            const double factor = fase * sqrt((TwoSL+1)*(TwoSR+1.0)) * Wigner::wigner6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
       
             for (int l_index=theindex+2; l_index<Prob->gL(); l_index++){
-               int ILdown = denBK->directProd(IL,denBK->gIrrep(l_index));
-               int IRdown = denBK->directProd(IR,denBK->gIrrep(l_index));
-               int memSkappa = denS->gKappa(NL-1, TwoSLdown, ILdown, N1, N2, TwoJ, NR-1, TwoSRdown, IRdown);
-               if (memSkappa!=-1){
-                  int dimRdown = denBK->gCurrentDim(theindex+2, NR-1, TwoSRdown, IRdown);
-                  int dimLdown = denBK->gCurrentDim(theindex,   NL-1, TwoSLdown, ILdown);
-               
-                  double * Qblock = Qleft[ l_index-theindex  ]->gStorage(NL-1,TwoSLdown,ILdown,NL,TwoSL,IL);
-                  double * Lblock = Lright[l_index-theindex-2]->gStorage(NR-1,TwoSRdown,IRdown,NR,TwoSR,IR);
-               
-                  char trans = 'T';
-                  char notra = 'N';
-                  double beta = 0.0; //set
-                  double alpha = factor;
-                  dgemm_(&trans,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Qblock,&dimLdown,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
-               
-                  beta = 1.0; //add
-                  alpha = 1.0;
-                  dgemm_(&notra,&notra,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Lblock,&dimRdown,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
-               
+            
+               #ifdef CHEMPS2_MPI_COMPILATION
+               if ( MPIchemps2::owner_q( Prob->gL(), l_index ) == MPIRANK )
+               #endif
+               {
+                  int ILdown = Irreps::directProd(IL,denBK->gIrrep(l_index));
+                  int IRdown = Irreps::directProd(IR,denBK->gIrrep(l_index));
+                  int memSkappa = denS->gKappa(NL-1, TwoSLdown, ILdown, N1, N2, TwoJ, NR-1, TwoSRdown, IRdown);
+                  if (memSkappa!=-1){
+                     int dimRdown = denBK->gCurrentDim(theindex+2, NR-1, TwoSRdown, IRdown);
+                     int dimLdown = denBK->gCurrentDim(theindex,   NL-1, TwoSLdown, ILdown);
+                  
+                     double * Qblock = Qleft[ l_index-theindex  ]->gStorage(NL-1,TwoSLdown,ILdown,NL,TwoSL,IL);
+                     double * Lblock = Lright[l_index-theindex-2]->gStorage(NR-1,TwoSRdown,IRdown,NR,TwoSR,IR);
+                  
+                     char trans = 'T';
+                     char notra = 'N';
+                     double beta = 0.0; //set
+                     double alpha = factor;
+                     dgemm_(&trans,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Qblock,&dimLdown,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
+                  
+                     beta = 1.0; //add
+                     alpha = 1.0;
+                     dgemm_(&notra,&notra,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Lblock,&dimRdown,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
+                  
+                  }
                }
             }
          }
@@ -469,7 +486,7 @@ void CheMPS2::Heff::addDiagram3Kand3F(const int ikappa, double * memS, double * 
    int IR = denS->gIR(ikappa);
    
    int theindex = denS->gIndex();
-   int IRdown = denBK->directProd(IR,denBK->gIrrep(theindex));
+   int IRdown = Irreps::directProd(IR,denBK->gIrrep(theindex));
    int TwoS2 = (N2==1)?1:0;
    
    int dimL   = denBK->gCurrentDim(theindex,  NL,TwoSL,IL);
@@ -482,7 +499,7 @@ void CheMPS2::Heff::addDiagram3Kand3F(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL,TwoSL,IL,0,N2,TwoS2,NR-1,TwoSRdown,IRdown);
             if (memSkappa!=-1){
                int fase = phase(TwoSL+TwoSR+TwoJ+2*TwoS2);
-               double factor = sqrt((TwoJ+1)*(TwoSR+1.0)) * fase * gsl_sf_coupling_6j(TwoS2,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
+               double factor = sqrt((TwoJ+1)*(TwoSR+1.0)) * fase * Wigner::wigner6j(TwoS2,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
                double beta = 1.0; //add
                char notr = 'N';
                double * BlockQ = Qright->gStorage(NR-1,TwoSRdown,IRdown,NR,TwoSR,IR);
@@ -505,7 +522,7 @@ void CheMPS2::Heff::addDiagram3Kand3F(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL,TwoSL,IL,1,N2,TwoJdown,NR-1,TwoSRdown,IRdown);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSL+TwoSR+TwoJdown+1+2*TwoS2);
-                     double factor = sqrt((TwoJdown+1)*(TwoSR+1.0)) * fase * gsl_sf_coupling_6j(TwoJdown,TwoS2,1,TwoSR,TwoSRdown,TwoSL);
+                     double factor = sqrt((TwoJdown+1)*(TwoSR+1.0)) * fase * Wigner::wigner6j( TwoJdown, TwoS2, 1, TwoSR, TwoSRdown, TwoSL );
                      double beta = 1.0; //add
                      char notr = 'N';
                   
@@ -543,7 +560,7 @@ void CheMPS2::Heff::addDiagram3Kand3F(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL,TwoSL,IL,1,N2,TwoJdown,NR+1,TwoSRdown,IRdown);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSL+TwoSRdown+TwoJdown+2*TwoS2);
-                     double factor = sqrt((TwoJdown+1)*(TwoSRdown+1.0)) * fase * gsl_sf_coupling_6j(TwoJdown,TwoS2,1,TwoSR,TwoSRdown,TwoSL);
+                     double factor = sqrt((TwoJdown+1)*(TwoSRdown+1.0)) * fase * Wigner::wigner6j(TwoJdown,TwoS2,1,TwoSR,TwoSRdown,TwoSL);
                      double beta = 1.0; //add
                      char notr = 'N';
                      char tran = 'T';
@@ -563,7 +580,7 @@ void CheMPS2::Heff::addDiagram3Kand3F(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL,TwoSL,IL,2,N2,TwoS2,NR+1,TwoSRdown,IRdown);
             if (memSkappa!=-1){
                int fase = phase(TwoSL+TwoSRdown+TwoJ+1+2*TwoS2);
-               double factor = sqrt((TwoJ+1)*(TwoSRdown+1.0)) * fase * gsl_sf_coupling_6j(TwoS2,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
+               double factor = sqrt((TwoJ+1)*(TwoSRdown+1.0)) * fase * Wigner::wigner6j(TwoS2,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
                double beta = 1.0; //add
                char notr = 'N';
                char tran = 'T';
@@ -602,7 +619,7 @@ void CheMPS2::Heff::addDiagram3Land3G(const int ikappa, double * memS, double * 
    int IR = denS->gIR(ikappa);
    
    int theindex = denS->gIndex();
-   int IRdown = denBK->directProd(IR,denBK->gIrrep(theindex+1));
+   int IRdown = Irreps::directProd(IR,denBK->gIrrep(theindex+1));
    int TwoS1 = (N1==1)?1:0;
    
    int dimL   = denBK->gCurrentDim(theindex,  NL,TwoSL,IL);
@@ -615,7 +632,7 @@ void CheMPS2::Heff::addDiagram3Land3G(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL,TwoSL,IL,N1,0,TwoS1,NR-1,TwoSRdown,IRdown);
             if (memSkappa!=-1){
                int fase = phase(TwoSL+TwoSR+TwoS1+1);
-               double factor = sqrt((TwoJ+1)*(TwoSR+1.0)) * fase * gsl_sf_coupling_6j(TwoS1,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
+               double factor = sqrt((TwoJ+1)*(TwoSR+1.0)) * fase * Wigner::wigner6j(TwoS1,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
                double beta = 1.0; //add
                char notr = 'N';
                double * BlockQ = Qright->gStorage(NR-1,TwoSRdown,IRdown,NR,TwoSR,IR);
@@ -638,7 +655,7 @@ void CheMPS2::Heff::addDiagram3Land3G(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL,TwoSL,IL,N1,1,TwoJdown,NR-1,TwoSRdown,IRdown);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSL+TwoSR+TwoS1+2);
-                     double factor = sqrt((TwoJdown+1)*(TwoSR+1.0)) * fase * gsl_sf_coupling_6j(TwoJdown,TwoS1,1,TwoSR,TwoSRdown,TwoSL);
+                     double factor = sqrt((TwoJdown+1)*(TwoSR+1.0)) * fase * Wigner::wigner6j(TwoJdown,TwoS1,1,TwoSR,TwoSRdown,TwoSL);
                      double beta = 1.0; //add
                      char notr = 'N';
                   
@@ -676,7 +693,7 @@ void CheMPS2::Heff::addDiagram3Land3G(const int ikappa, double * memS, double * 
                   int memSkappa = denS->gKappa(NL,TwoSL,IL,N1,1,TwoJdown,NR+1,TwoSRdown,IRdown);
                   if (memSkappa!=-1){
                      int fase = phase(TwoSL+TwoSRdown+TwoS1+1);
-                     double factor = sqrt((TwoJdown+1)*(TwoSRdown+1.0)) * fase * gsl_sf_coupling_6j(TwoJdown,TwoS1,1,TwoSR,TwoSRdown,TwoSL);
+                     double factor = sqrt((TwoJdown+1)*(TwoSRdown+1.0)) * fase * Wigner::wigner6j(TwoJdown,TwoS1,1,TwoSR,TwoSRdown,TwoSL);
                      double beta = 1.0; //add
                      char notr = 'N';
                      char tran = 'T';
@@ -696,7 +713,7 @@ void CheMPS2::Heff::addDiagram3Land3G(const int ikappa, double * memS, double * 
             int memSkappa = denS->gKappa(NL,TwoSL,IL,N1,2,TwoS1,NR+1,TwoSRdown,IRdown);
             if (memSkappa!=-1){
                int fase = phase(TwoSL+TwoSRdown+TwoS1+2);
-               double factor = sqrt((TwoJ+1)*(TwoSRdown+1.0)) * fase * gsl_sf_coupling_6j(TwoS1,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
+               double factor = sqrt((TwoJ+1)*(TwoSRdown+1.0)) * fase * Wigner::wigner6j(TwoS1,TwoJ,1,TwoSR,TwoSRdown,TwoSL);
                double beta = 1.0; //add
                char notr = 'N';
                char tran = 'T';
@@ -724,6 +741,10 @@ void CheMPS2::Heff::addDiagram3Land3G(const int ikappa, double * memS, double * 
 
 void CheMPS2::Heff::addDiagram3J(const int ikappa, double * memS, double * memHeff, const Sobject * denS, TensorQ ** Qright, TensorL ** Lleft, double * temp) const{
 
+   #ifdef CHEMPS2_MPI_COMPILATION
+   const int MPIRANK = MPIchemps2::mpi_rank();
+   #endif
+
    int NL = denS->gNL(ikappa);
    int TwoSL = denS->gTwoSL(ikappa);
    int IL = denS->gIL(ikappa);
@@ -745,30 +766,36 @@ void CheMPS2::Heff::addDiagram3J(const int ikappa, double * memS, double * memHe
          if ((abs(TwoSLdown-TwoSRdown)<=TwoJ) && (TwoSLdown>=0) && (TwoSRdown>=0)){
       
             int fase = phase(TwoSLdown+TwoSR+TwoJ+1 + ((N1==1)?2:0) + ((N2==1)?2:0) );
-            const double factor = fase * sqrt((TwoSLdown+1)*(TwoSRdown+1.0)) * gsl_sf_coupling_6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
+            const double factor = fase * sqrt((TwoSLdown+1)*(TwoSRdown+1.0)) * Wigner::wigner6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
       
             for (int l_index=0; l_index<theindex; l_index++){
-               int ILdown = denBK->directProd(IL,denBK->gIrrep(l_index));
-               int IRdown = denBK->directProd(IR,denBK->gIrrep(l_index));
-               int memSkappa = denS->gKappa(NL+1, TwoSLdown, ILdown, N1, N2, TwoJ, NR+1, TwoSRdown, IRdown);
-               if (memSkappa!=-1){
             
-                  int dimRdown = denBK->gCurrentDim(theindex+2, NR+1, TwoSRdown, IRdown);
-                  int dimLdown = denBK->gCurrentDim(theindex,   NL+1, TwoSLdown, ILdown);
+               #ifdef CHEMPS2_MPI_COMPILATION
+               if ( MPIchemps2::owner_q( Prob->gL(), l_index ) == MPIRANK )
+               #endif
+               {
+                  int ILdown = Irreps::directProd(IL,denBK->gIrrep(l_index));
+                  int IRdown = Irreps::directProd(IR,denBK->gIrrep(l_index));
+                  int memSkappa = denS->gKappa(NL+1, TwoSLdown, ILdown, N1, N2, TwoJ, NR+1, TwoSRdown, IRdown);
+                  if (memSkappa!=-1){
                
-                  double * Lblock = Lleft[ theindex-1-l_index]->gStorage(NL,TwoSL,IL,NL+1,TwoSLdown,ILdown);
-                  double * Qblock = Qright[theindex+1-l_index]->gStorage(NR,TwoSR,IR,NR+1,TwoSRdown,IRdown);
-               
-                  char trans = 'T';
-                  char notra = 'N';
-                  double beta = 0.0; //set
-                  double alpha = factor;
-                  dgemm_(&notra,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Lblock,&dimLup,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
-               
-                  beta = 1.0; //add
-                  alpha = 1.0;
-                  dgemm_(&notra,&trans,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Qblock,&dimRup,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
-               
+                     int dimRdown = denBK->gCurrentDim(theindex+2, NR+1, TwoSRdown, IRdown);
+                     int dimLdown = denBK->gCurrentDim(theindex,   NL+1, TwoSLdown, ILdown);
+                  
+                     double * Lblock = Lleft[ theindex-1-l_index]->gStorage(NL,TwoSL,IL,NL+1,TwoSLdown,ILdown);
+                     double * Qblock = Qright[theindex+1-l_index]->gStorage(NR,TwoSR,IR,NR+1,TwoSRdown,IRdown);
+                  
+                     char trans = 'T';
+                     char notra = 'N';
+                     double beta = 0.0; //set
+                     double alpha = factor;
+                     dgemm_(&notra,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Lblock,&dimLup,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
+                  
+                     beta = 1.0; //add
+                     alpha = 1.0;
+                     dgemm_(&notra,&trans,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Qblock,&dimRup,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
+                  
+                  }
                }
             }
          }
@@ -781,29 +808,35 @@ void CheMPS2::Heff::addDiagram3J(const int ikappa, double * memS, double * memHe
          if ((abs(TwoSLdown-TwoSRdown)<=TwoJ) && (TwoSLdown>=0) && (TwoSRdown>=0)){
       
             int fase = phase(TwoSL+TwoSRdown+TwoJ+1 + ((N1==1)?2:0) + ((N2==1)?2:0) );
-            const double factor = fase * sqrt((TwoSL+1)*(TwoSR+1.0)) * gsl_sf_coupling_6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
+            const double factor = fase * sqrt((TwoSL+1)*(TwoSR+1.0)) * Wigner::wigner6j(TwoSL,TwoSR,TwoJ,TwoSRdown,TwoSLdown,1);
       
             for (int l_index=0; l_index<theindex; l_index++){
-               int ILdown = denBK->directProd(IL,denBK->gIrrep(l_index));
-               int IRdown = denBK->directProd(IR,denBK->gIrrep(l_index));
-               int memSkappa = denS->gKappa(NL-1, TwoSLdown, ILdown, N1, N2, TwoJ, NR-1, TwoSRdown, IRdown);
-               if (memSkappa!=-1){
-                  int dimRdown = denBK->gCurrentDim(theindex+2, NR-1, TwoSRdown, IRdown);
-                  int dimLdown = denBK->gCurrentDim(theindex,   NL-1, TwoSLdown, ILdown);
-               
-                  double * Lblock = Lleft[ theindex-1-l_index]->gStorage(NL-1,TwoSLdown,ILdown,NL,TwoSL,IL);
-                  double * Qblock = Qright[theindex+1-l_index]->gStorage(NR-1,TwoSRdown,IRdown,NR,TwoSR,IR);
-               
-                  char trans = 'T';
-                  char notra = 'N';
-                  double beta = 0.0; //set
-                  double alpha = factor;
-                  dgemm_(&trans,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Lblock,&dimLdown,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
-               
-                  beta = 1.0; //add
-                  alpha = 1.0;
-                  dgemm_(&notra,&notra,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Qblock,&dimRdown,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
-               
+            
+               #ifdef CHEMPS2_MPI_COMPILATION
+               if ( MPIchemps2::owner_q( Prob->gL(), l_index ) == MPIRANK )
+               #endif
+               {
+                  int ILdown = Irreps::directProd(IL,denBK->gIrrep(l_index));
+                  int IRdown = Irreps::directProd(IR,denBK->gIrrep(l_index));
+                  int memSkappa = denS->gKappa(NL-1, TwoSLdown, ILdown, N1, N2, TwoJ, NR-1, TwoSRdown, IRdown);
+                  if (memSkappa!=-1){
+                     int dimRdown = denBK->gCurrentDim(theindex+2, NR-1, TwoSRdown, IRdown);
+                     int dimLdown = denBK->gCurrentDim(theindex,   NL-1, TwoSLdown, ILdown);
+                  
+                     double * Lblock = Lleft[ theindex-1-l_index]->gStorage(NL-1,TwoSLdown,ILdown,NL,TwoSL,IL);
+                     double * Qblock = Qright[theindex+1-l_index]->gStorage(NR-1,TwoSRdown,IRdown,NR,TwoSR,IR);
+                  
+                     char trans = 'T';
+                     char notra = 'N';
+                     double beta = 0.0; //set
+                     double alpha = factor;
+                     dgemm_(&trans,&notra,&dimLup,&dimRdown,&dimLdown,&alpha,Lblock,&dimLdown,memS+denS->gKappa2index(memSkappa),&dimLdown,&beta,temp,&dimLup);
+                  
+                     beta = 1.0; //add
+                     alpha = 1.0;
+                     dgemm_(&notra,&notra,&dimLup,&dimRup,&dimRdown,&alpha,temp,&dimLup,Qblock,&dimRdown,&beta,memHeff+denS->gKappa2index(ikappa),&dimLup);
+                  
+                  }
                }
             }
          }

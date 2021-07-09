@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013 Sebastian Wouters
+   Copyright (C) 2013-2018 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,22 +22,28 @@
 
 #include "TensorX.h"
 #include "Lapack.h"
-#include "Gsl.h"
+#include "Wigner.h"
 
-CheMPS2::TensorX::TensorX(const int indexIn, const bool movingRightIn, const SyBookkeeper * denBKIn, const Problem * ProbIn) : TensorDiag(indexIn, denBKIn){
+CheMPS2::TensorX::TensorX(const int boundary_index, const bool moving_right, const SyBookkeeper * denBK, const Problem * Prob) :
+TensorOperator(boundary_index,
+               0, //two_j
+               0, //n_elec
+               0, //n_irrep
+               moving_right,
+               true,  //prime_last (doesn't matter for spin-0 tensors)
+               false, //jw_phase (four 2nd quantized operators)
+               denBK,
+               denBK){
 
-   movingRight = movingRightIn;
-   Prob = ProbIn;
+   this->Prob = Prob;
 
 }
 
-CheMPS2::TensorX::~TensorX(){
-
-}
+CheMPS2::TensorX::~TensorX(){ }
 
 void CheMPS2::TensorX::update(TensorT * denT){
 
-   if (movingRight){
+   if (moving_right){
       //PARALLEL
       #pragma omp parallel for schedule(dynamic)
       for (int ikappa=0; ikappa<nKappa; ikappa++){ makenewRight(ikappa, denT); }
@@ -49,49 +55,69 @@ void CheMPS2::TensorX::update(TensorT * denT){
 
 }
 
-void CheMPS2::TensorX::update(TensorT * denT, TensorL ** Ltensors, TensorX * Xtensor, TensorQ * Qtensor, TensorA * Atensor, TensorC * Ctensor, TensorF0 ** F0tensors, TensorD * Dtensor, TensorF1 ** F1tensors){
+void CheMPS2::TensorX::update(TensorT * denT, TensorL ** Ltensors, TensorX * Xtensor, TensorQ * Qtensor, TensorOperator * Atensor, TensorOperator * Ctensor, TensorOperator * Dtensor){
 
-   if (movingRight){
+   if (moving_right){
       //PARALLEL
-      #pragma omp parallel for schedule(dynamic)
-      for (int ikappa=0; ikappa<nKappa; ikappa++){
-         makenewRight(ikappa, denT);
-         if (index>1){
-            const int dimL = denBK->gMaxDimAtBound(index-1);
-            const int dimR = denBK->gMaxDimAtBound(index);
-            double * workmemLL = new double[dimL*dimL];
-            double * workmemLR = new double[dimL*dimR];
-            double * workmemRR = new double[dimR*dimR];
-            addTermXRight(ikappa, denT, Xtensor, workmemLR);
-            addTermQLRight(ikappa, denT, Ltensors, Qtensor, workmemRR, workmemLR, workmemLL);
-            addTermARight(ikappa, denT, Atensor, workmemRR, workmemLR);
-            addTermCF0Right(ikappa, denT, Ctensor, F0tensors, workmemLL, workmemLR);
-            addTermDF1Right(ikappa, denT, Dtensor, F1tensors, workmemLL, workmemLR);
+      #pragma omp parallel
+      {
+      
+         const bool doOtherThings = (index>1) ? true : false ;
+         const int dimL     = (doOtherThings) ? bk_up->gMaxDimAtBound(index-1) : 0 ;
+         const int dimR     = (doOtherThings) ? bk_up->gMaxDimAtBound(index)   : 0 ;
+         double * workmemLL = (doOtherThings) ? new double[dimL*dimL] : NULL ;
+         double * workmemLR = (doOtherThings) ? new double[dimL*dimR] : NULL ;
+         double * workmemRR = (doOtherThings) ? new double[dimR*dimR] : NULL ;
+      
+         #pragma omp for schedule(dynamic)
+         for (int ikappa=0; ikappa<nKappa; ikappa++){
+            makenewRight(ikappa, denT);
+            if (doOtherThings){
+               update_moving_right(ikappa, Xtensor, denT, denT, workmemLR);
+               addTermQLRight(ikappa, denT, Ltensors, Qtensor, workmemRR, workmemLR, workmemLL);
+               addTermARight(ikappa, denT, Atensor, workmemRR, workmemLR);
+               addTermCRight(ikappa, denT, Ctensor, workmemLR);
+               addTermDRight(ikappa, denT, Dtensor, workmemLR);
+            }
+         }
+         
+         if (doOtherThings){
             delete [] workmemLL;
             delete [] workmemLR;
             delete [] workmemRR;
          }
+      
       }
    } else {
       //PARALLEL
-      #pragma omp parallel for schedule(dynamic)
-      for (int ikappa=0; ikappa<nKappa; ikappa++){
-         makenewLeft(ikappa, denT);
-         if (index<Prob->gL()-1){
-            const int dimL = denBK->gMaxDimAtBound(index);
-            const int dimR = denBK->gMaxDimAtBound(index+1);
-            double * workmemLL = new double[dimL*dimL];
-            double * workmemLR = new double[dimL*dimR];
-            double * workmemRR = new double[dimR*dimR];
-            addTermXLeft(ikappa, denT, Xtensor, workmemLR);
-            addTermQLLeft(ikappa, denT, Ltensors, Qtensor, workmemLL, workmemLR, workmemRR);
-            addTermALeft(ikappa, denT, Atensor, workmemLR, workmemLL);
-            addTermCF0Left(ikappa, denT, Ctensor, F0tensors, workmemRR, workmemLR);
-            addTermDF1Left(ikappa, denT, Dtensor, F1tensors, workmemRR, workmemLR);
+      #pragma omp parallel
+      {
+      
+         const bool doOtherThings = (index<Prob->gL()-1) ? true : false ;
+         const int dimL     = (doOtherThings) ? bk_up->gMaxDimAtBound(index)   : 0 ;
+         const int dimR     = (doOtherThings) ? bk_up->gMaxDimAtBound(index+1) : 0 ;
+         double * workmemLL = (doOtherThings) ? new double[dimL*dimL] : NULL ;
+         double * workmemLR = (doOtherThings) ? new double[dimL*dimR] : NULL ;
+         double * workmemRR = (doOtherThings) ? new double[dimR*dimR] : NULL ;
+      
+         #pragma omp for schedule(dynamic)
+         for (int ikappa=0; ikappa<nKappa; ikappa++){
+            makenewLeft(ikappa, denT);
+            if (doOtherThings){
+               update_moving_left(ikappa, Xtensor, denT, denT, workmemLR);
+               addTermQLLeft(ikappa, denT, Ltensors, Qtensor, workmemLL, workmemLR, workmemRR);
+               addTermALeft(ikappa, denT, Atensor, workmemLR, workmemLL);
+               addTermCLeft(ikappa, denT, Ctensor, workmemLR);
+               addTermDLeft(ikappa, denT, Dtensor, workmemLR);
+            }
+         }
+         
+         if (doOtherThings){
             delete [] workmemLL;
             delete [] workmemLR;
             delete [] workmemRR;
          }
+      
       }
    }
 
@@ -99,16 +125,16 @@ void CheMPS2::TensorX::update(TensorT * denT, TensorL ** Ltensors, TensorX * Xte
 
 void CheMPS2::TensorX::makenewRight(const int ikappa, TensorT * denT){
    
-   int dimR = denBK->gCurrentDim(index,   sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
-   int dimL = denBK->gCurrentDim(index-1, sectorN1[ikappa]-2, sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimR = bk_up->gCurrentDim(index,   sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   int dimL = bk_up->gCurrentDim(index-1, sector_nelec_up[ikappa]-2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   double alpha = Prob->gMxElement(index-1,index-1,index-1,index-1);
       
-   if (dimL>0){
+   if ((dimL>0) && (fabs(alpha)>0.0)){
       
-      double * BlockT = denT->gStorage(sectorN1[ikappa]-2, sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+      double * BlockT = denT->gStorage(sector_nelec_up[ikappa]-2, sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
       char trans = 'T';
       char notr = 'N';
       double beta = 0.0; //because there's only 1 term contributing per kappa, we might as well set it i.o. adding
-      double alpha = Prob->gMxElement(index-1,index-1,index-1,index-1);
       dgemm_(&trans,&notr,&dimR,&dimR,&dimL,&alpha,BlockT,&dimL,BlockT,&dimL,&beta,storage+kappa2index[ikappa],&dimR);
       
    } else {
@@ -119,16 +145,16 @@ void CheMPS2::TensorX::makenewRight(const int ikappa, TensorT * denT){
 
 void CheMPS2::TensorX::makenewLeft(const int ikappa, TensorT * denT){
    
-   int dimL = denBK->gCurrentDim(index,   sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
-   int dimR = denBK->gCurrentDim(index+1, sectorN1[ikappa]+2, sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimL = bk_up->gCurrentDim(index,   sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   int dimR = bk_up->gCurrentDim(index+1, sector_nelec_up[ikappa]+2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   double alpha = Prob->gMxElement(index,index,index,index);
 
-   if (dimR>0){
+   if ((dimR>0) && (fabs(alpha)>0.0)){
    
-      double * BlockT = denT->gStorage(sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa]+2, sectorTwoS1[ikappa], sectorI1[ikappa]);
+      double * BlockT = denT->gStorage(sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa]+2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
       char trans = 'T';
       char notr = 'N';
       double beta = 0.0; //set, not add (only 1 term)
-      double alpha = Prob->gMxElement(index,index,index,index);
       dgemm_(&notr,&trans,&dimL,&dimL,&dimR,&alpha,BlockT,&dimL,BlockT,&dimL,&beta,storage+kappa2index[ikappa],&dimL);
       
    } else {
@@ -137,108 +163,10 @@ void CheMPS2::TensorX::makenewLeft(const int ikappa, TensorT * denT){
 
 }
 
-void CheMPS2::TensorX::addTermXRight(const int ikappa, TensorT * denT, TensorX * Xprev, double * workmemLR){
-
-   int dimR = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
-   for (int geval=0; geval<4; geval++){
-      int NL,TwoSL,IL;
-      switch(geval){
-         case 0:
-            NL = sectorN1[ikappa];
-            TwoSL = sectorTwoS1[ikappa];
-            IL = sectorI1[ikappa];
-            break;
-         case 1:
-            NL = sectorN1[ikappa]-2;
-            TwoSL = sectorTwoS1[ikappa];
-            IL = sectorI1[ikappa];
-            break;
-         case 2:
-            NL = sectorN1[ikappa]-1;
-            TwoSL = sectorTwoS1[ikappa]-1;
-            IL = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index-1) );
-            break;
-         case 3:
-            NL = sectorN1[ikappa]-1;
-            TwoSL = sectorTwoS1[ikappa]+1;
-            IL = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index-1) );
-            break;
-      }
-      int dimL = denBK->gCurrentDim(index-1,NL,TwoSL,IL);
-      if (dimL>0){
-
-         double * BlockT = denT->gStorage(NL,TwoSL,IL,sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa]);
-         double * BlockX = Xprev->gStorage(NL,TwoSL,IL,NL,TwoSL,IL);
-
-         //T^T * Xprev --> mem
-         char trans = 'T';
-         char notr = 'N';
-         double alpha = 1.0;
-         double beta = 0.0; //set
-         dgemm_(&trans,&notr,&dimR,&dimL,&dimL,&alpha,BlockT,&dimL,BlockX,&dimL,&beta,workmemLR,&dimR);
-         
-         //mem * T --> storage
-         beta = 1.0; //add
-         dgemm_(&notr,&notr,&dimR,&dimR,&dimL,&alpha,workmemLR,&dimR,BlockT,&dimL,&beta,storage+kappa2index[ikappa],&dimR);
-     
-      }
-   }
-
-}
-
-void CheMPS2::TensorX::addTermXLeft(const int ikappa, TensorT * denT, TensorX * Xprev, double * workmemLR){
-
-   int dimL = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
-   for (int geval=0; geval<4; geval++){
-      int NR,TwoSR,IR;
-      switch(geval){
-         case 0:
-            NR = sectorN1[ikappa];
-            TwoSR = sectorTwoS1[ikappa];
-            IR = sectorI1[ikappa];
-            break;
-         case 1:
-            NR = sectorN1[ikappa]+2;
-            TwoSR = sectorTwoS1[ikappa];
-            IR = sectorI1[ikappa];
-            break;
-         case 2:
-            NR = sectorN1[ikappa]+1;
-            TwoSR = sectorTwoS1[ikappa]-1;
-            IR = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index) );
-            break;
-         case 3:
-            NR = sectorN1[ikappa]+1;
-            TwoSR = sectorTwoS1[ikappa]+1;
-            IR = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index) );
-            break;
-      }
-      int dimR = denBK->gCurrentDim(index+1,NR,TwoSR,IR);
-      if (dimR>0){
-
-         double * BlockT = denT->gStorage(sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa],NR,TwoSR,IR);
-         double * BlockX = Xprev->gStorage(NR,TwoSR,IR,NR,TwoSR,IR);
-
-         //factor * T * Xprev --> mem
-         char notr = 'N';
-         double alpha = (geval>1) ? (TwoSR+1.0)/(sectorTwoS1[ikappa]+1.0) : 1.0;
-         double beta = 0.0; //set
-         dgemm_(&notr,&notr,&dimL,&dimR,&dimR,&alpha,BlockT,&dimL,BlockX,&dimR,&beta,workmemLR,&dimL);
-
-         //mem * T^T --> storage
-         char trans = 'T';
-         alpha = 1.0;
-         beta = 1.0; //add
-         dgemm_(&notr,&trans,&dimL,&dimL,&dimR,&alpha,workmemLR,&dimL,BlockT,&dimL,&beta,storage+kappa2index[ikappa],&dimL);
-        
-      }
-   }
-
-}
 
 void CheMPS2::TensorX::addTermQLRight(const int ikappa, TensorT * denT, TensorL ** Lprev, TensorQ * Qprev, double * workmemRR, double * workmemLR, double * workmemLL){
 
-   int dimR = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimR = bk_up->gCurrentDim(index, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
    int dimTot = dimR * dimR;
    for (int cnt=0; cnt<dimTot; cnt++){ workmemRR[cnt] = 0.0; }
    
@@ -246,44 +174,44 @@ void CheMPS2::TensorX::addTermQLRight(const int ikappa, TensorT * denT, TensorL 
       int NLup,TwoSLup,ILup,NLdown,TwoSLdown,ILdown;
       switch(geval){
          case 0:
-            NLup = sectorN1[ikappa]-1;
-            TwoSLup = sectorTwoS1[ikappa]-1;
-            ILup = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index-1) );
-            NLdown = sectorN1[ikappa];
-            TwoSLdown = sectorTwoS1[ikappa];
-            ILdown = sectorI1[ikappa];
+            NLup = sector_nelec_up[ikappa]-1;
+            TwoSLup = sector_spin_up[ikappa]-1;
+            ILup = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index-1) );
+            NLdown = sector_nelec_up[ikappa];
+            TwoSLdown = sector_spin_up[ikappa];
+            ILdown = sector_irrep_up[ikappa];
             break;
          case 1:
-            NLup = sectorN1[ikappa]-1;
-            TwoSLup = sectorTwoS1[ikappa]+1;
-            ILup = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index-1) );
-            NLdown = sectorN1[ikappa];
-            TwoSLdown = sectorTwoS1[ikappa];
-            ILdown = sectorI1[ikappa];
+            NLup = sector_nelec_up[ikappa]-1;
+            TwoSLup = sector_spin_up[ikappa]+1;
+            ILup = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index-1) );
+            NLdown = sector_nelec_up[ikappa];
+            TwoSLdown = sector_spin_up[ikappa];
+            ILdown = sector_irrep_up[ikappa];
             break;
          case 2:
-            NLup = sectorN1[ikappa]-2;
-            TwoSLup = sectorTwoS1[ikappa];
-            ILup = sectorI1[ikappa];
-            NLdown = sectorN1[ikappa]-1;
-            TwoSLdown = sectorTwoS1[ikappa]-1;
-            ILdown = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index-1) );
+            NLup = sector_nelec_up[ikappa]-2;
+            TwoSLup = sector_spin_up[ikappa];
+            ILup = sector_irrep_up[ikappa];
+            NLdown = sector_nelec_up[ikappa]-1;
+            TwoSLdown = sector_spin_up[ikappa]-1;
+            ILdown = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index-1) );
             break;
          case 3:
-            NLup = sectorN1[ikappa]-2;
-            TwoSLup = sectorTwoS1[ikappa];
-            ILup = sectorI1[ikappa];
-            NLdown = sectorN1[ikappa]-1;
-            TwoSLdown = sectorTwoS1[ikappa]+1;
-            ILdown = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index-1) );
+            NLup = sector_nelec_up[ikappa]-2;
+            TwoSLup = sector_spin_up[ikappa];
+            ILup = sector_irrep_up[ikappa];
+            NLdown = sector_nelec_up[ikappa]-1;
+            TwoSLdown = sector_spin_up[ikappa]+1;
+            ILdown = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index-1) );
             break;
       }
-      int dimLup   = denBK->gCurrentDim(index-1, NLup,   TwoSLup,   ILup);
-      int dimLdown = denBK->gCurrentDim(index-1, NLdown, TwoSLdown, ILdown);
+      int dimLup   = bk_up->gCurrentDim(index-1, NLup,   TwoSLup,   ILup);
+      int dimLdown = bk_up->gCurrentDim(index-1, NLdown, TwoSLdown, ILdown);
 
       if ((dimLup>0) && (dimLdown>0)){
-         double * BlockTup   = denT->gStorage(NLup,   TwoSLup,   ILup,   sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
-         double * BlockTdown = denT->gStorage(NLdown, TwoSLdown, ILdown, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+         double * BlockTup   = denT->gStorage(NLup,   TwoSLup,   ILup,   sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+         double * BlockTdown = denT->gStorage(NLdown, TwoSLdown, ILdown, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
          double * BlockQ    = Qprev->gStorage(NLup,   TwoSLup,   ILup,   NLdown,           TwoSLdown,           ILdown);
          
          double factor;
@@ -295,8 +223,8 @@ void CheMPS2::TensorX::addTermQLRight(const int ikappa, TensorT * denT, TensorL 
             
          } else {
          
-            int fase = ((((sectorTwoS1[ikappa]+1-TwoSLdown)/2)%2)!=0)?-1:1;
-            factor = fase * sqrt((TwoSLdown + 1.0)/(sectorTwoS1[ikappa] + 1.0));
+            int fase = ((((sector_spin_up[ikappa]+1-TwoSLdown)/2)%2)!=0)?-1:1;
+            factor = fase * sqrt((TwoSLdown + 1.0)/(sector_spin_up[ikappa] + 1.0));
             
             int dimLupdown = dimLup * dimLdown;
             int inc = 1;
@@ -304,7 +232,7 @@ void CheMPS2::TensorX::addTermQLRight(const int ikappa, TensorT * denT, TensorL 
             dcopy_(&dimLupdown,BlockQ,&inc,ptr,&inc);
             
             for (int loca=0; loca<index-1; loca++){
-               if (denBK->gIrrep(index-1) == denBK->gIrrep(loca)){
+               if (bk_up->gIrrep(index-1) == bk_up->gIrrep(loca)){
                   double alpha = Prob->gMxElement(loca, index-1, index-1, index-1);
                   double * BlockL = Lprev[index-2-loca]->gStorage(NLup, TwoSLup, ILup, NLdown, TwoSLdown, ILdown);
                   daxpy_(&dimLupdown,&alpha,BlockL,&inc,ptr,&inc);
@@ -341,7 +269,7 @@ void CheMPS2::TensorX::addTermQLRight(const int ikappa, TensorT * denT, TensorL 
 
 void CheMPS2::TensorX::addTermQLLeft(const int ikappa, TensorT * denT, TensorL ** Lprev, TensorQ * Qprev, double * workmemLL, double * workmemLR, double * workmemRR){
 
-   int dimL = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimL = bk_up->gCurrentDim(index, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
    int dimTot = dimL * dimL;
    for (int cnt=0; cnt<dimTot; cnt++){ workmemLL[cnt] = 0.0; }
    
@@ -349,57 +277,57 @@ void CheMPS2::TensorX::addTermQLLeft(const int ikappa, TensorT * denT, TensorL *
       int NRup,TwoSRup,IRup,NRdown,TwoSRdown,IRdown;
       switch(geval){
          case 0:
-            NRup = sectorN1[ikappa];
-            TwoSRup = sectorTwoS1[ikappa];
-            IRup = sectorI1[ikappa];
-            NRdown = sectorN1[ikappa]+1;
-            TwoSRdown = sectorTwoS1[ikappa]-1;
-            IRdown = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index) );
+            NRup = sector_nelec_up[ikappa];
+            TwoSRup = sector_spin_up[ikappa];
+            IRup = sector_irrep_up[ikappa];
+            NRdown = sector_nelec_up[ikappa]+1;
+            TwoSRdown = sector_spin_up[ikappa]-1;
+            IRdown = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index) );
             break;
          case 1:
-            NRup = sectorN1[ikappa];
-            TwoSRup = sectorTwoS1[ikappa];
-            IRup = sectorI1[ikappa];
-            NRdown = sectorN1[ikappa]+1;
-            TwoSRdown = sectorTwoS1[ikappa]+1;
-            IRdown = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index) );
+            NRup = sector_nelec_up[ikappa];
+            TwoSRup = sector_spin_up[ikappa];
+            IRup = sector_irrep_up[ikappa];
+            NRdown = sector_nelec_up[ikappa]+1;
+            TwoSRdown = sector_spin_up[ikappa]+1;
+            IRdown = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index) );
             break;
          case 2:
-            NRup = sectorN1[ikappa]+1;
-            TwoSRup = sectorTwoS1[ikappa]-1;
-            IRup = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index) );
-            NRdown = sectorN1[ikappa]+2;
-            TwoSRdown = sectorTwoS1[ikappa];
-            IRdown = sectorI1[ikappa];
+            NRup = sector_nelec_up[ikappa]+1;
+            TwoSRup = sector_spin_up[ikappa]-1;
+            IRup = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index) );
+            NRdown = sector_nelec_up[ikappa]+2;
+            TwoSRdown = sector_spin_up[ikappa];
+            IRdown = sector_irrep_up[ikappa];
             break;
          case 3:
-            NRup = sectorN1[ikappa]+1;
-            TwoSRup = sectorTwoS1[ikappa]+1;
-            IRup = denBK->directProd( sectorI1[ikappa] , denBK->gIrrep(index) );
-            NRdown = sectorN1[ikappa]+2;
-            TwoSRdown = sectorTwoS1[ikappa];
-            IRdown = sectorI1[ikappa];
+            NRup = sector_nelec_up[ikappa]+1;
+            TwoSRup = sector_spin_up[ikappa]+1;
+            IRup = Irreps::directProd( sector_irrep_up[ikappa] , bk_up->gIrrep(index) );
+            NRdown = sector_nelec_up[ikappa]+2;
+            TwoSRdown = sector_spin_up[ikappa];
+            IRdown = sector_irrep_up[ikappa];
             break;
       }
-      int dimRup   = denBK->gCurrentDim(index+1, NRup,   TwoSRup,   IRup);
-      int dimRdown = denBK->gCurrentDim(index+1, NRdown, TwoSRdown, IRdown);
+      int dimRup   = bk_up->gCurrentDim(index+1, NRup,   TwoSRup,   IRup);
+      int dimRdown = bk_up->gCurrentDim(index+1, NRdown, TwoSRdown, IRdown);
 
       if ((dimRup>0) && (dimRdown>0)){
-         double * BlockTup   = denT->gStorage(sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa], NRup,   TwoSRup,   IRup);
-         double * BlockTdown = denT->gStorage(sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa], NRdown, TwoSRdown, IRdown);
+         double * BlockTup   = denT->gStorage(sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa], NRup,   TwoSRup,   IRup);
+         double * BlockTdown = denT->gStorage(sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa], NRdown, TwoSRdown, IRdown);
          double * BlockQ    = Qprev->gStorage(NRup,             TwoSRup,             IRup,             NRdown, TwoSRdown, IRdown);
          
          double factor;
          double * ptr;
          if (geval<2){
          
-            factor = (TwoSRdown + 1.0)/(sectorTwoS1[ikappa] + 1.0);
+            factor = (TwoSRdown + 1.0)/(sector_spin_up[ikappa] + 1.0);
             ptr = BlockQ;
             
          } else {
          
-            int fase = ((((sectorTwoS1[ikappa]+1-TwoSRup)/2)%2)!=0)?-1:1;
-            factor = fase * sqrt((TwoSRup + 1.0)/(sectorTwoS1[ikappa] + 1.0));
+            int fase = ((((sector_spin_up[ikappa]+1-TwoSRup)/2)%2)!=0)?-1:1;
+            factor = fase * sqrt((TwoSRup + 1.0)/(sector_spin_up[ikappa] + 1.0));
          
             int dimRupdown = dimRup * dimRdown;
             ptr = workmemRR;
@@ -407,7 +335,7 @@ void CheMPS2::TensorX::addTermQLLeft(const int ikappa, TensorT * denT, TensorL *
             dcopy_(&dimRupdown,BlockQ,&inc,ptr,&inc);
             
             for (int loca=index+1; loca<Prob->gL(); loca++){
-               if (denBK->gIrrep(index) == denBK->gIrrep(loca)){
+               if (bk_up->gIrrep(index) == bk_up->gIrrep(loca)){
                   double alpha = Prob->gMxElement(index,index,index,loca);
                   double * BlockL = Lprev[loca-index-1]->gStorage(NRup, TwoSRup, IRup, NRdown, TwoSRdown, IRdown);
                   daxpy_(&dimRupdown,&alpha,BlockL,&inc,ptr,&inc);
@@ -442,17 +370,17 @@ void CheMPS2::TensorX::addTermQLLeft(const int ikappa, TensorT * denT, TensorL *
 
 }
 
-void CheMPS2::TensorX::addTermARight(const int ikappa, TensorT * denT, TensorA * Aprev, double * workmemRR, double * workmemLR){
+void CheMPS2::TensorX::addTermARight(const int ikappa, TensorT * denT, TensorOperator * Aprev, double * workmemRR, double * workmemLR){
 
-   int dimR     = denBK->gCurrentDim(index,   sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
-   int dimLup   = denBK->gCurrentDim(index-1, sectorN1[ikappa]-2, sectorTwoS1[ikappa], sectorI1[ikappa]);
-   int dimLdown = denBK->gCurrentDim(index-1, sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimR     = bk_up->gCurrentDim(index,   sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   int dimLup   = bk_up->gCurrentDim(index-1, sector_nelec_up[ikappa]-2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   int dimLdown = bk_up->gCurrentDim(index-1, sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
 
    if ((dimLup>0) && (dimLdown>0)){
       
-      double * BlockTup   = denT->gStorage(sectorN1[ikappa]-2, sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
-      double * BlockTdown = denT->gStorage(sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
-      double * BlockA    = Aprev->gStorage(sectorN1[ikappa]-2, sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+      double * BlockTup   = denT->gStorage(sector_nelec_up[ikappa]-2, sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+      double * BlockTdown = denT->gStorage(sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+      double * BlockA    = Aprev->gStorage(sector_nelec_up[ikappa]-2, sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
 
       //factor * Tup^T * A --> mem2 //set
       char trans = 'T';
@@ -481,17 +409,17 @@ void CheMPS2::TensorX::addTermARight(const int ikappa, TensorT * denT, TensorA *
 
 }
 
-void CheMPS2::TensorX::addTermALeft(const int ikappa, TensorT * denT, TensorA * Aprev, double * workmemLR, double * workmemLL){
+void CheMPS2::TensorX::addTermALeft(const int ikappa, TensorT * denT, TensorOperator * Aprev, double * workmemLR, double * workmemLL){
 
-   int dimL     = denBK->gCurrentDim(index,   sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
-   int dimRup   = denBK->gCurrentDim(index+1, sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
-   int dimRdown = denBK->gCurrentDim(index+1, sectorN1[ikappa]+2, sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimL     = bk_up->gCurrentDim(index,   sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   int dimRup   = bk_up->gCurrentDim(index+1, sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+   int dimRdown = bk_up->gCurrentDim(index+1, sector_nelec_up[ikappa]+2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
 
    if ((dimRup>0) && (dimRdown>0)){
       
-      double * BlockTup   = denT->gStorage(sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa],   sectorTwoS1[ikappa], sectorI1[ikappa]);
-      double * BlockTdown = denT->gStorage(sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa]+2, sectorTwoS1[ikappa], sectorI1[ikappa]);
-      double * BlockA    = Aprev->gStorage(sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa], sectorN1[ikappa]+2, sectorTwoS1[ikappa], sectorI1[ikappa]);
+      double * BlockTup   = denT->gStorage(sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa],   sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+      double * BlockTdown = denT->gStorage(sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa]+2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
+      double * BlockA    = Aprev->gStorage(sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa], sector_nelec_up[ikappa]+2, sector_spin_up[ikappa], sector_irrep_up[ikappa]);
 
       //factor * Tup * A --> mem2 //set
       char notr = 'N';
@@ -520,50 +448,38 @@ void CheMPS2::TensorX::addTermALeft(const int ikappa, TensorT * denT, TensorA * 
 
 }
 
-void CheMPS2::TensorX::addTermCF0Right(const int ikappa, TensorT * denT, TensorC * denC, TensorF0 ** deF0s, double * workmemLL, double * workmemLR){
+void CheMPS2::TensorX::addTermCRight(const int ikappa, TensorT * denT, TensorOperator * denC, double * workmemLR){
 
-   int dimR = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimR = bk_up->gCurrentDim(index, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
    for (int geval=0; geval<3; geval++){
       int NL, TwoSL, IL;
       switch(geval){
          case 0:
-            NL = sectorN1[ikappa]-1;
-            TwoSL = sectorTwoS1[ikappa]-1;
-            IL = denBK->directProd( sectorI1[ikappa], denBK->gIrrep(index-1) );
+            NL = sector_nelec_up[ikappa]-1;
+            TwoSL = sector_spin_up[ikappa]-1;
+            IL = Irreps::directProd( sector_irrep_up[ikappa], bk_up->gIrrep(index-1) );
             break;
          case 1:
-            NL = sectorN1[ikappa]-1;
-            TwoSL = sectorTwoS1[ikappa]+1;
-            IL = denBK->directProd( sectorI1[ikappa], denBK->gIrrep(index-1) );
+            NL = sector_nelec_up[ikappa]-1;
+            TwoSL = sector_spin_up[ikappa]+1;
+            IL = Irreps::directProd( sector_irrep_up[ikappa], bk_up->gIrrep(index-1) );
             break;
          case 2:
-            NL = sectorN1[ikappa]-2;
-            TwoSL = sectorTwoS1[ikappa];
-            IL = sectorI1[ikappa];
+            NL = sector_nelec_up[ikappa]-2;
+            TwoSL = sector_spin_up[ikappa];
+            IL = sector_irrep_up[ikappa];
             break;
       }
-      int dimL = denBK->gCurrentDim(index-1,NL,TwoSL,IL);
+      int dimL = bk_up->gCurrentDim(index-1,NL,TwoSL,IL);
       if (dimL>0){
       
-         int dimLsq = dimL * dimL;
          double * BlockC = denC->gStorage(NL,TwoSL,IL,NL,TwoSL,IL);
-         int inc = 1;
-         dcopy_(&dimLsq,BlockC,&inc,workmemLL,&inc);
-         
-         for (int loca=0; loca<index-1; loca++){
-         
-            double alpha = 2*Prob->gMxElement(loca,index-1,loca,index-1) - Prob->gMxElement(loca,loca,index-1,index-1);
-            double * BlockF0 = deF0s[index-2-loca]->gStorage(NL,TwoSL,IL,NL,TwoSL,IL);
-            daxpy_(&dimLsq,&alpha,BlockF0,&inc,workmemLL,&inc);
-         
-         }
-         
-         double * BlockT = denT->gStorage(NL,TwoSL,IL,sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa]);
+         double * BlockT = denT->gStorage(NL,TwoSL,IL,sector_nelec_up[ikappa],sector_spin_up[ikappa],sector_irrep_up[ikappa]);
 
          double factor = (geval<2)?sqrt(0.5):sqrt(2.0);
          double beta = 0.0; //set
          char totrans = 'T';
-         dgemm_(&totrans, &totrans, &dimR, &dimL, &dimL, &factor, BlockT, &dimL, workmemLL, &dimL, &beta, workmemLR, &dimR);
+         dgemm_(&totrans, &totrans, &dimR, &dimL, &dimL, &factor, BlockT, &dimL, BlockC, &dimL, &beta, workmemLR, &dimR);
          
          totrans = 'N';
          factor = 1.0;
@@ -575,51 +491,39 @@ void CheMPS2::TensorX::addTermCF0Right(const int ikappa, TensorT * denT, TensorC
 
 }
 
-void CheMPS2::TensorX::addTermCF0Left(const int ikappa, TensorT * denT, TensorC * denC, TensorF0 ** deF0s, double * workmemRR, double * workmemLR){
+void CheMPS2::TensorX::addTermCLeft(const int ikappa, TensorT * denT, TensorOperator * denC, double * workmemLR){
 
-   int dimL = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimL = bk_up->gCurrentDim(index, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
    for (int geval=0; geval<3; geval++){
       int NR, TwoSR, IR;
       switch(geval){
          case 0:
-            NR = sectorN1[ikappa]+1;
-            TwoSR = sectorTwoS1[ikappa]-1;
-            IR = denBK->directProd( sectorI1[ikappa], denBK->gIrrep(index) );
+            NR = sector_nelec_up[ikappa]+1;
+            TwoSR = sector_spin_up[ikappa]-1;
+            IR = Irreps::directProd( sector_irrep_up[ikappa], bk_up->gIrrep(index) );
             break;
          case 1:
-            NR = sectorN1[ikappa]+1;
-            TwoSR = sectorTwoS1[ikappa]+1;
-            IR = denBK->directProd( sectorI1[ikappa], denBK->gIrrep(index) );
+            NR = sector_nelec_up[ikappa]+1;
+            TwoSR = sector_spin_up[ikappa]+1;
+            IR = Irreps::directProd( sector_irrep_up[ikappa], bk_up->gIrrep(index) );
             break;
          case 2:
-            NR = sectorN1[ikappa]+2;
-            TwoSR = sectorTwoS1[ikappa];
-            IR = sectorI1[ikappa];
+            NR = sector_nelec_up[ikappa]+2;
+            TwoSR = sector_spin_up[ikappa];
+            IR = sector_irrep_up[ikappa];
             break;
       }
-      int dimR = denBK->gCurrentDim(index+1,NR,TwoSR,IR);
+      int dimR = bk_up->gCurrentDim(index+1,NR,TwoSR,IR);
       if (dimR>0){
       
-         int dimRsq = dimR * dimR;
          double * BlockC = denC->gStorage(NR,TwoSR,IR,NR,TwoSR,IR);
-         int inc = 1;
-         dcopy_(&dimRsq,BlockC,&inc,workmemRR,&inc);
-         
-         for (int loca=index+1; loca<Prob->gL(); loca++){
-         
-            double alpha = 2*Prob->gMxElement(index,loca,index,loca) - Prob->gMxElement(index,index,loca,loca);
-            double * BlockF0 = deF0s[loca-index-1]->gStorage(NR,TwoSR,IR,NR,TwoSR,IR);
-            daxpy_(&dimRsq,&alpha,BlockF0,&inc,workmemRR,&inc);
-         
-         }
-         
-         double * BlockT = denT->gStorage(sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa],NR,TwoSR,IR);
+         double * BlockT = denT->gStorage(sector_nelec_up[ikappa],sector_spin_up[ikappa],sector_irrep_up[ikappa],NR,TwoSR,IR);
 
-         double factor = (geval<2)?(sqrt(0.5)*(TwoSR+1.0)/(sectorTwoS1[ikappa]+1.0)):sqrt(2.0);
+         double factor = (geval<2)?(sqrt(0.5)*(TwoSR+1.0)/(sector_spin_up[ikappa]+1.0)):sqrt(2.0);
          double beta = 0.0; //set
          char trans = 'T';
          char notr = 'N';
-         dgemm_(&notr, &trans, &dimL, &dimR, &dimR, &factor, BlockT, &dimL, workmemRR, &dimR, &beta, workmemLR, &dimL);
+         dgemm_(&notr, &trans, &dimL, &dimR, &dimR, &factor, BlockT, &dimL, BlockC, &dimR, &beta, workmemLR, &dimL);
          
          factor = 1.0;
          beta = 1.0; //add
@@ -630,60 +534,49 @@ void CheMPS2::TensorX::addTermCF0Left(const int ikappa, TensorT * denT, TensorC 
 
 }
 
-void CheMPS2::TensorX::addTermDF1Right(const int ikappa, TensorT * denT, TensorD * denD, TensorF1 ** deF1s, double * workmemLL, double * workmemLR){
+void CheMPS2::TensorX::addTermDRight(const int ikappa, TensorT * denT, TensorOperator * denD, double * workmemLR){
 
-   int dimR = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimR = bk_up->gCurrentDim(index, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
    
-   const int IL = denBK->directProd( sectorI1[ikappa], denBK->gIrrep(index-1) );
-   const int NL = sectorN1[ikappa]-1;
+   const int IL = Irreps::directProd( sector_irrep_up[ikappa], bk_up->gIrrep(index-1) );
+   const int NL = sector_nelec_up[ikappa]-1;
    
    for (int geval=0; geval<4; geval++){
       int TwoSLup, TwoSLdown;
       switch(geval){
          case 0:
-            TwoSLup   = sectorTwoS1[ikappa]-1;
-            TwoSLdown = sectorTwoS1[ikappa]-1;
+            TwoSLup   = sector_spin_up[ikappa]-1;
+            TwoSLdown = sector_spin_up[ikappa]-1;
             break;
          case 1:
-            TwoSLup   = sectorTwoS1[ikappa]+1;
-            TwoSLdown = sectorTwoS1[ikappa]-1;
+            TwoSLup   = sector_spin_up[ikappa]+1;
+            TwoSLdown = sector_spin_up[ikappa]-1;
             break;
          case 2:
-            TwoSLup   = sectorTwoS1[ikappa]-1;
-            TwoSLdown = sectorTwoS1[ikappa]+1;
+            TwoSLup   = sector_spin_up[ikappa]-1;
+            TwoSLdown = sector_spin_up[ikappa]+1;
             break;
          case 3:
-            TwoSLup   = sectorTwoS1[ikappa]+1;
-            TwoSLdown = sectorTwoS1[ikappa]+1;
+            TwoSLup   = sector_spin_up[ikappa]+1;
+            TwoSLdown = sector_spin_up[ikappa]+1;
             break;
       }
       
-      int dimLup   = denBK->gCurrentDim(index-1,NL,TwoSLup,  IL);
-      int dimLdown = denBK->gCurrentDim(index-1,NL,TwoSLdown,IL);
+      int dimLup   = bk_up->gCurrentDim(index-1,NL,TwoSLup,  IL);
+      int dimLdown = bk_up->gCurrentDim(index-1,NL,TwoSLdown,IL);
       
       if ((dimLup>0) && (dimLdown>0)){
       
-         int dimLsq = dimLup * dimLdown;
          double * BlockD = denD->gStorage(NL,TwoSLdown,IL,NL,TwoSLup,IL);
-         int inc = 1;
-         dcopy_(&dimLsq,BlockD,&inc,workmemLL,&inc);
+         double * BlockTup   = denT->gStorage(NL,TwoSLup,  IL,sector_nelec_up[ikappa],sector_spin_up[ikappa],sector_irrep_up[ikappa]);
+         double * BlockTdown = (TwoSLup==TwoSLdown)? BlockTup : denT->gStorage(NL,TwoSLdown,IL,sector_nelec_up[ikappa],sector_spin_up[ikappa],sector_irrep_up[ikappa]);
          
-         for (int loca=0; loca<index-1; loca++){
-         
-            double alpha = - Prob->gMxElement(loca,loca,index-1,index-1);
-            double * BlockF1 = deF1s[index-2-loca]->gStorage(NL,TwoSLdown,IL,NL,TwoSLup,IL);
-            daxpy_(&dimLsq,&alpha,BlockF1,&inc,workmemLL,&inc);
-         
-         }
-         
-         double * BlockTup   = denT->gStorage(NL,TwoSLup,  IL,sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa]);
-         double * BlockTdown = (TwoSLup==TwoSLdown)? BlockTup : denT->gStorage(NL,TwoSLdown,IL,sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa]);
-         
-         int fase = ((((TwoSLdown + sectorTwoS1[ikappa] + 1)/2)%2)!=0)?-1:1;
-         double factor = fase * sqrt(3.0 * (TwoSLup+1)) * gsl_sf_coupling_6j(1,1,2,TwoSLup,TwoSLdown,sectorTwoS1[ikappa]);
+         int fase = ((((TwoSLdown + sector_spin_up[ikappa] + 1)/2)%2)!=0)?-1:1;
+         double factor = fase * sqrt(3.0 * (TwoSLup+1))
+                       * Wigner::wigner6j( 1, 1, 2, TwoSLup, TwoSLdown, sector_spin_up[ikappa] );
          double beta = 0.0; //set
          char totrans = 'T';
-         dgemm_(&totrans, &totrans, &dimR, &dimLdown, &dimLup, &factor, BlockTup, &dimLup, workmemLL, &dimLdown, &beta, workmemLR, &dimR);
+         dgemm_(&totrans, &totrans, &dimR, &dimLdown, &dimLup, &factor, BlockTup, &dimLup, BlockD, &dimLdown, &beta, workmemLR, &dimR);
          
          totrans = 'N';
          factor = 1.0;
@@ -695,61 +588,50 @@ void CheMPS2::TensorX::addTermDF1Right(const int ikappa, TensorT * denT, TensorD
 
 }
 
-void CheMPS2::TensorX::addTermDF1Left(const int ikappa, TensorT * denT, TensorD * denD, TensorF1 ** deF1s, double * workmemRR, double * workmemLR){
+void CheMPS2::TensorX::addTermDLeft(const int ikappa, TensorT * denT, TensorOperator * denD, double * workmemLR){
 
-   int dimL = denBK->gCurrentDim(index, sectorN1[ikappa], sectorTwoS1[ikappa], sectorI1[ikappa]);
+   int dimL = bk_up->gCurrentDim(index, sector_nelec_up[ikappa], sector_spin_up[ikappa], sector_irrep_up[ikappa]);
    
-   const int NR = sectorN1[ikappa]+1;
-   const int IR = denBK->directProd( sectorI1[ikappa], denBK->gIrrep(index) );
+   const int NR = sector_nelec_up[ikappa]+1;
+   const int IR = Irreps::directProd( sector_irrep_up[ikappa], bk_up->gIrrep(index) );
    
    for (int geval=0; geval<4; geval++){
       int TwoSRup, TwoSRdown;
       switch(geval){
          case 0:
-            TwoSRup   = sectorTwoS1[ikappa] - 1;
-            TwoSRdown = sectorTwoS1[ikappa] - 1;
+            TwoSRup   = sector_spin_up[ikappa] - 1;
+            TwoSRdown = sector_spin_up[ikappa] - 1;
             break;
          case 1:
-            TwoSRup   = sectorTwoS1[ikappa] + 1;
-            TwoSRdown = sectorTwoS1[ikappa] - 1;
+            TwoSRup   = sector_spin_up[ikappa] + 1;
+            TwoSRdown = sector_spin_up[ikappa] - 1;
             break;
          case 2:
-            TwoSRup   = sectorTwoS1[ikappa] - 1;
-            TwoSRdown = sectorTwoS1[ikappa] + 1;
+            TwoSRup   = sector_spin_up[ikappa] - 1;
+            TwoSRdown = sector_spin_up[ikappa] + 1;
             break;
          case 3:
-            TwoSRup   = sectorTwoS1[ikappa] + 1;
-            TwoSRdown = sectorTwoS1[ikappa] + 1;
+            TwoSRup   = sector_spin_up[ikappa] + 1;
+            TwoSRdown = sector_spin_up[ikappa] + 1;
             break;
       }
       
-      int dimRup   = denBK->gCurrentDim(index+1,NR,TwoSRup,  IR);
-      int dimRdown = denBK->gCurrentDim(index+1,NR,TwoSRdown,IR);
+      int dimRup   = bk_up->gCurrentDim(index+1,NR,TwoSRup,  IR);
+      int dimRdown = bk_up->gCurrentDim(index+1,NR,TwoSRdown,IR);
       
       if ((dimRup>0) && (dimRdown>0)){
       
-         int dimRsq = dimRup * dimRdown;
          double * BlockD = denD->gStorage(NR,TwoSRdown,IR,NR,TwoSRup,IR);
-         int inc = 1;
-         dcopy_(&dimRsq,BlockD,&inc,workmemRR,&inc);
+         double * BlockTup   = denT->gStorage(sector_nelec_up[ikappa],sector_spin_up[ikappa],sector_irrep_up[ikappa],NR,TwoSRup,IR);
+         double * BlockTdown = (TwoSRup == TwoSRdown)? BlockTup : denT->gStorage(sector_nelec_up[ikappa],sector_spin_up[ikappa],sector_irrep_up[ikappa],NR,TwoSRdown,IR);
          
-         for (int loca=index+1; loca<Prob->gL(); loca++){
-         
-            double alpha = - Prob->gMxElement(index,index,loca,loca);
-            double * BlockF1 = deF1s[loca-index-1]->gStorage(NR,TwoSRdown,IR,NR,TwoSRup,IR);
-            daxpy_(&dimRsq,&alpha,BlockF1,&inc,workmemRR,&inc);
-         
-         }
-         
-         double * BlockTup   = denT->gStorage(sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa],NR,TwoSRup,IR);
-         double * BlockTdown = (TwoSRup == TwoSRdown)? BlockTup : denT->gStorage(sectorN1[ikappa],sectorTwoS1[ikappa],sectorI1[ikappa],NR,TwoSRdown,IR);
-         
-         int fase = ((((sectorTwoS1[ikappa] + TwoSRdown + 3)/2)%2)!=0)?-1:1;
-         double factor = fase*sqrt(3.0 *(TwoSRup+1))*((TwoSRdown + 1.0)/(sectorTwoS1[ikappa]+1.0))*gsl_sf_coupling_6j(1,1,2,TwoSRup,TwoSRdown,sectorTwoS1[ikappa]);
+         int fase = ((((sector_spin_up[ikappa] + TwoSRdown + 3)/2)%2)!=0)?-1:1;
+         double factor = fase*sqrt(3.0 *(TwoSRup+1))*((TwoSRdown + 1.0)/(sector_spin_up[ikappa]+1.0))
+                       * Wigner::wigner6j( 1, 1, 2, TwoSRup, TwoSRdown, sector_spin_up[ikappa] );
          double beta = 0.0; //set
          char trans = 'T';
          char notr = 'N';
-         dgemm_(&notr, &trans, &dimL, &dimRdown, &dimRup, &factor, BlockTup, &dimL, workmemRR, &dimRdown, &beta, workmemLR, &dimL);
+         dgemm_(&notr, &trans, &dimL, &dimRdown, &dimRup, &factor, BlockTup, &dimL, BlockD, &dimRdown, &beta, workmemLR, &dimL);
          
          factor = 1.0;
          beta = 1.0; //add

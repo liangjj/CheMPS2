@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013 Sebastian Wouters
+   Copyright (C) 2013-2018 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,786 +22,521 @@
 #include <fstream>
 #include <string>
 #include <math.h>
-#include <sstream>
+#include <algorithm>
+#include <assert.h>
 
 #include "CASSCF.h"
 #include "Lapack.h"
+#include "Special.h"
+#include "MPIchemps2.h"
 
 using std::string;
 using std::ifstream;
 using std::cout;
 using std::endl;
+using std::max;
 
-CheMPS2::CASSCF::CASSCF(const string filename){
+CheMPS2::CASSCF::CASSCF( Hamiltonian * ham_in, int * docc, int * socc, int * nocc, int * ndmrg, int * nvirt, const string new_tmp_folder ){
 
-   HamOrig = new Hamiltonian(filename);
-   
-   int * orb2irrepHamOrig = new int[HamOrig->getL()];
-   for (int cnt=0; cnt<HamOrig->getL(); cnt++){ orb2irrepHamOrig[cnt] = HamOrig->getOrbitalIrrep(cnt); }
-   HamRotated = new Hamiltonian(HamOrig->getL(), HamOrig->getNGroup(), orb2irrepHamOrig);
-   delete [] orb2irrepHamOrig;
-   
-   L = HamOrig->getL();
-   
-   SymmInfo.setGroup(HamOrig->getNGroup());
-   
-   numberOfIrreps = SymmInfo.getNumberOfIrreps();
-   
-   OrbPerIrrep = new int[numberOfIrreps];
-   
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){ OrbPerIrrep[cnt] = 0; }
-   for (int cnt=0; cnt<L; cnt++){ OrbPerIrrep[HamOrig->getOrbitalIrrep(cnt)]++; }
+   #ifdef CHEMPS2_MPI_COMPILATION
+      const bool am_i_master = ( MPIchemps2::mpi_rank() == MPI_CHEMPS2_MASTER );
+   #else
+      const bool am_i_master = true;
+   #endif
 
-   allocateAndFillOCC(filename);
-   
-   checkHF();
-   
-   setupStartCalled = false;
-   
-}
+   NUCL_ORIG = ham_in->getEconst();
+   TMAT_ORIG = ham_in->getTmat();
+   VMAT_ORIG = ham_in->getVmat();
 
-CheMPS2::CASSCF::CASSCF(Hamiltonian * HamIn, int * DOCCin, int * SOCCin){
+   L = ham_in->getL();
+   SymmInfo.setGroup( ham_in->getNGroup() );
+   num_irreps = SymmInfo.getNumberOfIrreps();
+   successful_solve = false;
 
-   L = HamIn->getL();
-   int SyGroup = HamIn->getNGroup();
-   int * OrbIrreps = new int[L];
-   for (int cnt=0; cnt<L; cnt++){ OrbIrreps[cnt] = HamIn->getOrbitalIrrep(cnt); }
-
-   HamOrig    = new Hamiltonian(L, SyGroup, OrbIrreps);
-   HamRotated = new Hamiltonian(L, SyGroup, OrbIrreps);
-   
-   delete [] OrbIrreps;
-   
-   SymmInfo.setGroup(SyGroup);
-   
-   HamOrig->setEconst(HamIn->getEconst());
-   for (int cnt=0; cnt<L; cnt++){
-      int I1 = HamIn->getOrbitalIrrep(cnt);
-      for (int cnt2=cnt; cnt2<L; cnt2++){
-         int I2 = HamIn->getOrbitalIrrep(cnt2);
-         if (I1==I2){
-            HamOrig->setTmat(cnt,cnt2,HamIn->getTmat(cnt,cnt2));
-         }
-         for (int cnt3=cnt; cnt3<L; cnt3++){
-            int I3 = HamIn->getOrbitalIrrep(cnt3);
-            for (int cnt4=cnt2; cnt4<L; cnt4++){
-               int I4 = HamIn->getOrbitalIrrep(cnt4);
-               if (SymmInfo.directProd(I1,I2) == SymmInfo.directProd(I3,I4)){
-                  HamOrig->setVmat(cnt,cnt2,cnt3,cnt4,HamIn->getVmat(cnt,cnt2,cnt3,cnt4));
-               }
-            }
-         }
-      }
+   if (( am_i_master ) && ( docc != NULL ) && ( socc != NULL )){
+      cout << "DOCC = [ ";
+      for ( int irrep = 0; irrep < num_irreps-1; irrep++ ){ cout << docc[ irrep ] << " , "; }
+      cout << docc[ num_irreps - 1 ] << " ]" << endl;
+      cout << "SOCC = [ ";
+      for ( int irrep = 0; irrep < num_irreps-1; irrep++ ){ cout << socc[ irrep ] << " , "; }
+      cout << socc[ num_irreps - 1 ] << " ]" << endl;
    }
-   
-   numberOfIrreps = SymmInfo.getNumberOfIrreps();
-   
-   OrbPerIrrep = new int[numberOfIrreps];
-   
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){ OrbPerIrrep[cnt] = 0; }
-   for (int cnt=0; cnt<L; cnt++){ OrbPerIrrep[HamOrig->getOrbitalIrrep(cnt)]++; }
 
-   allocateAndFillOCC(DOCCin, SOCCin);
-   
-   checkHF();
-   
-   setupStartCalled = false;
-   
+   for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+      const int norb_in  = nocc[ irrep ] + ndmrg[ irrep ] + nvirt[ irrep ];
+      const int norb_ham = VMAT_ORIG->get_irrep_size( irrep );
+      if (( norb_ham != norb_in ) && ( am_i_master )){
+         cout << "CASSCF::CASSCF : nocc[" << irrep << "] + ndmrg[" << irrep << "] + nvirt[" << irrep << "] = " << norb_in
+              << " and in the Hamiltonian norb[" << irrep << "] = " << norb_ham << "." << endl;
+      }
+      assert( norb_ham == norb_in );
+   }
+
+   iHandler = new DMRGSCFindices( L, SymmInfo.getGroupNumber(), nocc, ndmrg, nvirt );
+   unitary  = new DMRGSCFunitary( iHandler );
+
+   // Allocate space for the DMRG 1DM and 2DM
+   nOrbDMRG = iHandler->getDMRGcumulative( num_irreps );
+   DMRG1DM = new double[nOrbDMRG * nOrbDMRG];
+   DMRG2DM = new double[nOrbDMRG * nOrbDMRG * nOrbDMRG * nOrbDMRG];
+
+   // To store the F-matrix and Q-matrix(occ,act)
+   theFmatrix = new DMRGSCFmatrix( iHandler );  theFmatrix->clear();
+   theQmatOCC = new DMRGSCFmatrix( iHandler );  theQmatOCC->clear();
+   theQmatACT = new DMRGSCFmatrix( iHandler );  theQmatACT->clear();
+   theQmatWORK= new DMRGSCFmatrix( iHandler ); theQmatWORK->clear();
+   theTmatrix = new DMRGSCFmatrix( iHandler );  theTmatrix->clear();
+
+   if ( am_i_master ){
+      if (( docc != NULL ) && ( socc != NULL )){ checkHF( docc, socc ); } // Print the MO info. This requires the iHandler to be created...
+      iHandler->Print();
+      cout << "DMRGSCF::setupStart : Number of variables in the x-matrix = " << unitary->getNumVariablesX() << endl;
+   }
+
+   this->tmp_folder = new_tmp_folder;
+
 }
 
 CheMPS2::CASSCF::~CASSCF(){
 
-   delete HamOrig;
-   delete HamRotated;
-   
-   delete [] DOCC;
-   delete [] SOCC;
-   delete [] OrbPerIrrep;
-   
-   if (setupStartCalled){
-   
-      delete [] Nocc;
-      delete [] NDMRG;
-      delete [] Nvirt;
-      
-      delete [] irrepOfEachDMRGOrbital;
-      delete [] listDMRG;
-      delete [] listCondensed;
-      
-      for (int irrep=0; irrep<numberOfIrreps; irrep++){
-         for (int case_=0; case_<3; case_++){ delete [] xmatrix[irrep][case_]; }
-         delete [] xmatrix[irrep];
-      }
-      delete [] xmatrix;
-      
-      for (int irrep=0; irrep<numberOfIrreps; irrep++){ delete [] unitary[irrep]; }
-      delete [] unitary;
-      
-      delete [] jumpsHamOrig;
-      delete [] DMRG1DM;
-      delete [] x_firstindex;
-      delete [] x_secondindex;
-      
-      for (int cnt=0; cnt<numberOfIrreps; cnt++){ delete [] Fmatrix[cnt]; }
-      delete [] Fmatrix;
-      
-   }
+   delete [] DMRG1DM;
+   delete [] DMRG2DM;
+
+   //The following objects depend on iHandler: delete them first
+   delete theFmatrix;
+   delete theQmatOCC;
+   delete theQmatACT;
+   delete theQmatWORK;
+   delete theTmatrix;
+   delete unitary;
+
+   delete iHandler;
 
 }
 
-int CheMPS2::CASSCF::getNumberOfIrreps(){ return numberOfIrreps; }
+int CheMPS2::CASSCF::get_num_irreps(){ return num_irreps; }
 
-void CheMPS2::CASSCF::copyXsolutionBack(double * vector){
+void CheMPS2::CASSCF::copy2DMover( TwoDM * theDMRG2DM, const int LAS, double * two_dm ){
 
-   for (int irrep=0; irrep<numberOfIrreps; irrep++){
-         
-      for (int cntOcc=0; cntOcc<Nocc[irrep]; cntOcc++){
-         for (int cntDMRG=0; cntDMRG<NDMRG[irrep]; cntDMRG++){
-            int index1 = jumpsHamOrig[irrep] + Nocc[irrep] + cntDMRG;
-            int index2 = jumpsHamOrig[irrep] + cntOcc;
-            int xsolindex = x_tolin(index1,index2);
-            if (xsolindex==-1){ cout << "Error: xsolindex==-1" << endl; }
-            xmatrix[irrep][0][ cntDMRG + NDMRG[irrep] * cntOcc ] = vector[xsolindex];
-         }
-      }
-      for (int cntDMRG=0; cntDMRG<NDMRG[irrep]; cntDMRG++){
-         for (int cntVirt=0; cntVirt<Nvirt[irrep]; cntVirt++){
-            int index1 = jumpsHamOrig[irrep] + Nocc[irrep] + NDMRG[irrep] + cntVirt;
-            int index2 = jumpsHamOrig[irrep] + Nocc[irrep] + cntDMRG;
-            int xsolindex = x_tolin(index1,index2);
-            if (xsolindex==-1){ cout << "Error: xsolindex==-1" << endl; }
-            xmatrix[irrep][1][ cntVirt + Nvirt[irrep] * cntDMRG ] = vector[xsolindex];
-         }
-      }
-      for (int cntOcc=0; cntOcc<Nocc[irrep]; cntOcc++){
-         for (int cntVirt=0; cntVirt<Nvirt[irrep]; cntVirt++){
-            int index1 = jumpsHamOrig[irrep] + Nocc[irrep] + NDMRG[irrep] + cntVirt;
-            int index2 = jumpsHamOrig[irrep] + cntOcc;
-            int xsolindex = x_tolin(index1,index2);
-            if (xsolindex==-1){ cout << "Error: xsolindex==-1" << endl; }
-            xmatrix[irrep][2][ cntVirt + Nvirt[irrep] * cntOcc ] = vector[xsolindex];
-         }
-      }
-   }
-
-}
-
-int CheMPS2::CASSCF::x_tolin(const int p_index, const int q_index){
-
-   for (int cnt=0; cnt<x_linearlength; cnt++){
-      if ((p_index == x_firstindex[cnt]) && (q_index == x_secondindex[cnt])){ return cnt; }
-   }
-   
-   return -1;
-
-}
-
-double CheMPS2::CASSCF::get2DMrotated(const int index1, const int index2, const int index3, const int index4) const{
-
-   if ((index1<0) || (index1>=L)){ return 0.0; }
-   if ((index2<0) || (index2>=L)){ return 0.0; }
-   if ((index3<0) || (index3>=L)){ return 0.0; }
-   if ((index4<0) || (index4>=L)){ return 0.0; } //Within bounds now
-
-   const int irrep1 = HamOrig->getOrbitalIrrep(index1);
-   const int irrep2 = HamOrig->getOrbitalIrrep(index2);
-   const int irrep3 = HamOrig->getOrbitalIrrep(index3);
-   const int irrep4 = HamOrig->getOrbitalIrrep(index4);
-   
-   if (SymmInfo.directProd(irrep1,irrep2) != SymmInfo.directProd(irrep3,irrep4)){ return 0.0; } //Matrix element is symmetry allowed
-   
-   int cnt1 = index1 - jumpsHamOrig[irrep1];
-   int cnt2 = index2 - jumpsHamOrig[irrep2];
-   int cnt3 = index3 - jumpsHamOrig[irrep3];
-   int cnt4 = index4 - jumpsHamOrig[irrep4];
-   
-   if (cnt1 >= Nocc[irrep1] + NDMRG[irrep1]){ return 0.0; }
-   if (cnt2 >= Nocc[irrep2] + NDMRG[irrep2]){ return 0.0; }
-   if (cnt3 >= Nocc[irrep3] + NDMRG[irrep3]){ return 0.0; }
-   if (cnt4 >= Nocc[irrep4] + NDMRG[irrep4]){ return 0.0; } //No virtual orbitals now
-   
-   const int numberOcc = ((cnt1 < Nocc[irrep1]) ? 1 : 0) + ((cnt2 < Nocc[irrep2]) ? 1 : 0) + ((cnt3 < Nocc[irrep3]) ? 1 : 0) + ((cnt4 < Nocc[irrep4]) ? 1 : 0);
-   
-   if ((numberOcc%2)!=0){ return 0.0; } //Now it is allowed --> need to find out its value.
-   
-   if (numberOcc==4){
-      if (index3==index4){
-         if ((index1==index2) && (index1==index3)){ return 2.0; } //all indices equal
-         else { return 0.0; }
-      }
-      return (((index1 == index3) && (index2 == index4)) ? 4.0 : 0.0 ) - (((index1 == index4) && (index2 == index3)) ? 2.0 : 0.0 );
-   }
-   
-   if (numberOcc==0){
-   
-      int DMRGindex1 = 0;
-      int DMRGindex2 = 0;
-      int DMRGindex3 = 0;
-      int DMRGindex4 = 0;
-      
-      for (int bla=0; bla<irrep1; bla++){ DMRGindex1 += NDMRG[bla]; }
-      for (int bla=0; bla<irrep2; bla++){ DMRGindex2 += NDMRG[bla]; }
-      for (int bla=0; bla<irrep3; bla++){ DMRGindex3 += NDMRG[bla]; }
-      for (int bla=0; bla<irrep4; bla++){ DMRGindex4 += NDMRG[bla]; }
-      
-      DMRGindex1 += cnt1 - Nocc[irrep1];
-      DMRGindex2 += cnt2 - Nocc[irrep2];
-      DMRGindex3 += cnt3 - Nocc[irrep3];
-      DMRGindex4 += cnt4 - Nocc[irrep4];
-      
-      return theDMRG2DM->getTwoDMA_HAM(DMRGindex1, DMRGindex2, DMRGindex3, DMRGindex4);
-      
-   }
-   
-   //Now two indices are occ, two are active
-   if (cnt1<Nocc[irrep1]){ // index1 in occ
-   
-      if (cnt3<Nocc[irrep3]){
-         
-         if (cnt1 != cnt3){
-            return 0.0;
-         } else {
-            int DMRGindex2 = 0;
-            int DMRGindex4 = 0;
-            for (int bla=0; bla<irrep2; bla++){ DMRGindex2 += NDMRG[bla]; }
-            for (int bla=0; bla<irrep4; bla++){ DMRGindex4 += NDMRG[bla]; }
-            DMRGindex2 += cnt2 - Nocc[irrep2];
-            DMRGindex4 += cnt4 - Nocc[irrep4];
-            
-            return 2 * DMRG1DM[DMRGindex2 + nOrbDMRG*DMRGindex4]; //2 * get1DMrotated(index2,index4);
-         }
-         
-      }
-      if (cnt4<Nocc[irrep4]){
-      
-         if (cnt1 != cnt4){
-            return 0.0;
-         } else {
-            int DMRGindex2 = 0;
-            int DMRGindex3 = 0;
-            for (int bla=0; bla<irrep2; bla++){ DMRGindex2 += NDMRG[bla]; }
-            for (int bla=0; bla<irrep3; bla++){ DMRGindex3 += NDMRG[bla]; }
-            DMRGindex2 += cnt2 - Nocc[irrep2];
-            DMRGindex3 += cnt3 - Nocc[irrep3];
-            
-            return - DMRG1DM[DMRGindex2 + nOrbDMRG*DMRGindex3]; // - get1DMrotated(index2,index3);
-         }
-      
-      }
-   
-   } else { // index1 in act
-   
-      if (cnt3>=Nocc[irrep3]){
-      
-         if (cnt2 != cnt4){
-            return 0.0;
-         } else {
-            int DMRGindex1 = 0;
-            int DMRGindex3 = 0;
-            for (int bla=0; bla<irrep1; bla++){ DMRGindex1 += NDMRG[bla]; }
-            for (int bla=0; bla<irrep3; bla++){ DMRGindex3 += NDMRG[bla]; }
-            DMRGindex1 += cnt1 - Nocc[irrep1];
-            DMRGindex3 += cnt3 - Nocc[irrep3];
-            
-            return 2 * DMRG1DM[DMRGindex1 + nOrbDMRG*DMRGindex3]; //2 * get1DMrotated(index1,index3);
-         }
-      
-      }
-      if (cnt4>=Nocc[irrep4]){
-      
-         if (cnt2 != cnt3){
-            return 0.0;
-         } else {
-            int DMRGindex1 = 0;
-            int DMRGindex4 = 0;
-            for (int bla=0; bla<irrep1; bla++){ DMRGindex1 += NDMRG[bla]; }
-            for (int bla=0; bla<irrep4; bla++){ DMRGindex4 += NDMRG[bla]; }
-            DMRGindex1 += cnt1 - Nocc[irrep1];
-            DMRGindex4 += cnt4 - Nocc[irrep4];
-            
-            return - DMRG1DM[DMRGindex1 + nOrbDMRG*DMRGindex4]; //- get1DMrotated(index1,index4);
-         }
-      
-      }
-   
-   }
-   
-   return 0.0; //Two occ, two active; but index1 and index2 are in the same space (occ/act) --> zero
-
-}
-
-double CheMPS2::CASSCF::get1DMrotated(const int index1, const int index2) const{
-
-   if ((index1<0) || (index1>=L)){ return 0.0; }
-   if ((index2<0) || (index2>=L)){ return 0.0; } //Within bounds now.
-
-   const int irrep = HamOrig->getOrbitalIrrep(index1);
-
-   if (irrep != HamOrig->getOrbitalIrrep(index2)){ return 0.0; } //Of same irrep now.
-   
-   int cnt1 = index1 - jumpsHamOrig[irrep];
-   int cnt2 = index2 - jumpsHamOrig[irrep];
-   
-   if (cnt1 < Nocc[irrep]){ //If in occupied HF orbitals
-      if (cnt1==cnt2){ return 2.0; }
-      else{ return 0.0; }
-   }
-   
-   cnt1 -= Nocc[irrep];
-   cnt2 -= Nocc[irrep];
-   
-   if ((cnt1 >= 0) && (cnt1 < NDMRG[irrep]) && (cnt2 >= 0) && (cnt2 < NDMRG[irrep])){ //If both in DMRG orbitals
-      int jump = 0;
-      for (int bla=0; bla<irrep; bla++){ jump += NDMRG[bla]; }
-      int DMRGindex1 = jump + cnt1;
-      int DMRGindex2 = jump + cnt2;
-      return DMRG1DM[DMRGindex1 + nOrbDMRG*DMRGindex2];
-   }
-   
-   return 0.0; //All other cases : 0.0
-
-}
-
-void CheMPS2::CASSCF::setDMRG1DM(const int N){
-
-   const double prefactor = 1.0/(N-1.0);
-
-   for (int cnt1=0; cnt1<nOrbDMRG; cnt1++){
-      for (int cnt2=cnt1; cnt2<nOrbDMRG; cnt2++){
-         DMRG1DM[cnt1 + nOrbDMRG*cnt2] = 0.0;
-         for (int cnt3=0; cnt3<nOrbDMRG; cnt3++){ DMRG1DM[cnt1 + nOrbDMRG*cnt2] += theDMRG2DM->getTwoDMA_HAM(cnt1,cnt3,cnt2,cnt3); }
-         DMRG1DM[cnt1 + nOrbDMRG*cnt2] *= prefactor;
-         DMRG1DM[cnt2 + nOrbDMRG*cnt1] = DMRG1DM[cnt1 + nOrbDMRG*cnt2];
-      }
-   }
-
-}
-
-void CheMPS2::CASSCF::calcNOON(){
-
-   int size = nOrbDMRG * nOrbDMRG;
-   double * copy = new double[size];
-   double * eigenval = new double[nOrbDMRG];
-   double * work = new double[size];
-      
-   for (int cnt=0; cnt<size; cnt++){ copy[cnt] = DMRG1DM[cnt]; }
-      
-   char jobz = 'N';
-   char uplo = 'U';
-   int info;
-   dsyev_(&jobz,&uplo,&nOrbDMRG,copy,&nOrbDMRG,eigenval,work,&size,&info);
-      
-   cout << "CASSCF :: DMRG 1DM eigenvalues [NOON] = [ ";
-   for (int cnt=0; cnt<nOrbDMRG-1; cnt++){ cout << eigenval[cnt] << " , "; }
-   cout << eigenval[nOrbDMRG-1] << " ]." << endl;
-      
-   delete [] work;
-   delete [] eigenval;
-   delete [] copy;
-
-}
-
-void CheMPS2::CASSCF::updateUnitary(double * temp1, double * temp2){
-
-   //Per irrep
-   for (int irrep=0; irrep<numberOfIrreps; irrep++){
-
-      int linsize = OrbPerIrrep[irrep];
-      int size = linsize * linsize;
-      
-      if (linsize>1){ //linsize is op z'n minst 2 dus temp1, temp1+size, temp1+2*size,temp1+3*size zijn zeker ok
-         
-         //Construct the anti-symmetric x-matrix
-         double * xblock = temp1;
-         for (int cnt=0; cnt<size; cnt++){ xblock[cnt] = 0.0; }
-         for (int cntOcc=0; cntOcc<Nocc[irrep]; cntOcc++){
-            for (int cntDMRG=0; cntDMRG<NDMRG[irrep]; cntDMRG++){
-               xblock[ Nocc[irrep] + cntDMRG + linsize*cntOcc ] = xmatrix[irrep][0][ cntDMRG + NDMRG[irrep] * cntOcc];
-               xblock[ cntOcc + linsize*(Nocc[irrep] + cntDMRG) ] = - xblock[ Nocc[irrep] + cntDMRG + linsize*cntOcc ];
+   for ( int i1 = 0; i1 < LAS; i1++ ){
+      for ( int i2 = 0; i2 < LAS; i2++ ){
+         for ( int i3 = 0; i3 < LAS; i3++ ){
+            for ( int i4 = 0; i4 < LAS; i4++ ){
+               // The assignment has been changed to an addition for state-averaged calculations!
+               two_dm[ i1 + LAS * ( i2 + LAS * ( i3 + LAS * i4 ) ) ] += theDMRG2DM->getTwoDMA_HAM( i1, i2, i3, i4 );
             }
          }
-         for (int cntDMRG=0; cntDMRG<NDMRG[irrep]; cntDMRG++){
-            for (int cntVirt=0; cntVirt<Nvirt[irrep]; cntVirt++){
-               xblock[ Nocc[irrep] + NDMRG[irrep] + cntVirt + linsize*(Nocc[irrep] + cntDMRG )] = xmatrix[irrep][1][ cntVirt + Nvirt[irrep] * cntDMRG ];
-               xblock[ Nocc[irrep] + cntDMRG + linsize*(Nocc[irrep] + NDMRG[irrep] + cntVirt )]
-                   = - xblock[ Nocc[irrep] + NDMRG[irrep] + cntVirt + linsize*( Nocc[irrep] + cntDMRG ) ];
-            }
-         }
-         for (int cntOcc=0; cntOcc<Nocc[irrep]; cntOcc++){
-            for (int cntVirt=0; cntVirt<Nvirt[irrep]; cntVirt++){
-               xblock[ Nocc[irrep] + NDMRG[irrep] + cntVirt + linsize*cntOcc ] = xmatrix[irrep][2][ cntVirt + Nvirt[irrep] * cntOcc ];
-               xblock[ cntOcc + linsize*( Nocc[irrep] + NDMRG[irrep] + cntVirt ) ]
-                   = - xblock[ Nocc[irrep] + NDMRG[irrep] + cntVirt + linsize*cntOcc ];
-            }
-         }
-         
-         //Calculate its eigenvalues and eigenvectors
-         double * Bmat = temp2;
-         char notr = 'N';
-         double alpha = 1.0;
-         double beta = 0.0; //SET !!!
-         dgemm_(&notr,&notr,&linsize,&linsize,&linsize,&alpha,xblock,&linsize,xblock,&linsize,&beta,Bmat,&linsize); //Bmat = xblock * xblock
-         
-         char uplo = 'U';
-         char jobz = 'V';
-         double * eigenval = temp1 + 2*size;
-         double * work = temp1 + size;
-         int info;
-         dsyev_(&jobz, &uplo, &linsize, Bmat, &linsize, eigenval, work, &size, &info); // xblock * xblock = Bmat * eigenval * Bmat^T
-         
-         dgemm_(&notr,&notr,&linsize,&linsize,&linsize,&alpha,xblock,&linsize,Bmat,&linsize,&beta,work,&linsize);
-         char trans = 'T';
-         double * work2 = temp2 + size;
-         dgemm_(&trans,&notr,&linsize,&linsize,&linsize,&alpha,Bmat,&linsize,work,&linsize,&beta,work2,&linsize); //work2 = Bmat^T * xblock * Bmat
-         
-         if (CheMPS2::CASSCF_debugPrint){
-            cout << "lambdas of irrep block " << irrep << " : " << endl;
-            for (int cnt=0; cnt<linsize/2; cnt++){
-               cout << "   block = [ " << work2[2*cnt   + linsize*2*cnt] << " , " << work2[2*cnt   + linsize*(2*cnt+1)] << " ] " << endl;
-               cout << "           [ " << work2[2*cnt+1 + linsize*2*cnt] << " , " << work2[2*cnt+1 + linsize*(2*cnt+1)] << " ] " << endl;
-            }
-         }
-         
-         for (int cnt=0; cnt<linsize/2; cnt++){
-            eigenval[cnt] = 0.5*( work2[2*cnt + linsize*(2*cnt+1)] - work2[2*cnt+1 + linsize*(2*cnt)] );
-            work2[2*cnt + linsize*(2*cnt+1)] -= eigenval[cnt];
-            work2[2*cnt+1 + linsize*(2*cnt)] += eigenval[cnt];
-         }
-         
-         if (CheMPS2::CASSCF_debugPrint){
-            double TwoNormResidual = 0.0;
-            for (int cnt=0; cnt<size; cnt++){ TwoNormResidual += work2[cnt] * work2[cnt]; }
-            TwoNormResidual = sqrt(TwoNormResidual);
-            cout << "TwoNormResidual of irrep block " << irrep << " = " << TwoNormResidual << endl;
-         }
-         
-         //Calculate exp(x)
-         for (int cnt=0; cnt<size; cnt++){ work2[cnt] = 0.0; }
-         for (int cnt=0; cnt<linsize/2; cnt++){
-            double cosine = cos(eigenval[cnt]);
-            double sine = sin(eigenval[cnt]);
-            work2[2*cnt   + linsize*(2*cnt  )] = cosine;
-            work2[2*cnt+1 + linsize*(2*cnt+1)] = cosine;
-            work2[2*cnt   + linsize*(2*cnt+1)] = sine;
-            work2[2*cnt+1 + linsize*(2*cnt  )] = - sine;
-         }
-         for (int cnt=2*(linsize/2); cnt<linsize; cnt++){
-            work2[cnt*(linsize + 1)] = 1.0;
-         }
-         dgemm_(&notr,&notr,&linsize,&linsize,&linsize,&alpha,Bmat,&linsize,work2,&linsize,&beta,work,&linsize);
-         dgemm_(&notr,&trans,&linsize,&linsize,&linsize,&alpha,work,&linsize,Bmat,&linsize,&beta,work2,&linsize); //work2 = exp(xblock)
-         
-         //U <-- exp(x) * U
-         dgemm_(&notr,&notr,&linsize,&linsize,&linsize,&alpha,work2,&linsize,unitary[irrep],&linsize,&beta,work,&linsize);
-         int inc = 1;
-         dcopy_(&size, work, &inc, unitary[irrep], &inc);
-         
-         //How unitary is the unitary
-         if (CheMPS2::CASSCF_debugPrint){
-         
-            dgemm_(&trans,&notr,&linsize,&linsize,&linsize,&alpha,unitary[irrep],&linsize,unitary[irrep],&linsize,&beta,work2,&linsize);
+      }
+   }
+
+}
+
+void CheMPS2::CASSCF::setDMRG1DM( const int num_elec, const int LAS, double * one_dm, double * two_dm ){
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+      const bool am_i_master = ( MPIchemps2::mpi_rank() == MPI_CHEMPS2_MASTER );
+   #else
+      const bool am_i_master = true;
+   #endif
+
+   if ( am_i_master ){
+      const double prefactor = 1.0 / ( num_elec - 1 );
+      for ( int cnt1 = 0; cnt1 < LAS; cnt1++ ){
+         for ( int cnt2 = cnt1; cnt2 < LAS; cnt2++ ){
             double value = 0.0;
-            for (int cnt=0; cnt<linsize; cnt++){
-               value += (work2[cnt*(1+linsize)]-1.0) * (work2[cnt*(1+linsize)]-1.0);
-               for (int cnt2=cnt+1; cnt2<linsize; cnt2++){
-                  value += work2[cnt + cnt2*linsize] * work2[cnt + cnt2*linsize] + work2[cnt2 + cnt*linsize] * work2[cnt2 + cnt*linsize];
-               }
-            }
-            value = sqrt(value);
-            cout << "Two-norm of unitary[" << irrep << "]^(dagger) * unitary[" << irrep << "] - I = " << value << endl;
-         
-         }
-      
-      }
-   
-   }
-
-}
-
-void CheMPS2::CASSCF::fillHamDMRG(Hamiltonian * HamDMRG){
-
-   //Calculate the constant part of the energy.
-   double Econst = HamRotated->getEconst();
-   for (int cnt=0; cnt<nCondensed; cnt++){
-      Econst += 2*HamRotated->getTmat(listCondensed[cnt],listCondensed[cnt]);
-      for (int cnt2=0; cnt2<nCondensed; cnt2++){
-         Econst += 2*HamRotated->getVmat(listCondensed[cnt],listCondensed[cnt2],listCondensed[cnt],listCondensed[cnt2])
-                 -   HamRotated->getVmat(listCondensed[cnt],listCondensed[cnt2],listCondensed[cnt2],listCondensed[cnt]);
-      }
-   }
-   HamDMRG->setEconst(Econst);
-   
-   //Calculate the one-body and two-body matrix elements.
-   for (int cnt=0; cnt<nOrbDMRG; cnt++){
-      for (int cnt2=0; cnt2<nOrbDMRG; cnt2++){
-         const int productSymm = SymmInfo.directProd(irrepOfEachDMRGOrbital[cnt],irrepOfEachDMRGOrbital[cnt2]);
-         if (productSymm == SymmInfo.getTrivialIrrep()){
-            double value = HamRotated->getTmat(listDMRG[cnt], listDMRG[cnt2]);
-            for (int cnt3=0; cnt3<nCondensed; cnt3++){
-               value += 2 * HamRotated->getVmat(listDMRG[cnt],listCondensed[cnt3],listDMRG[cnt2],listCondensed[cnt3])
-                      -     HamRotated->getVmat(listDMRG[cnt],listCondensed[cnt3],listCondensed[cnt3],listDMRG[cnt2]);
-            }
-            HamDMRG->setTmat(cnt,cnt2,value);
-         }
-         for (int cnt3=0; cnt3<nOrbDMRG; cnt3++){
-            for (int cnt4=0; cnt4<nOrbDMRG; cnt4++){
-               if (productSymm == SymmInfo.directProd(irrepOfEachDMRGOrbital[cnt3],irrepOfEachDMRGOrbital[cnt4])){
-                  HamDMRG->setVmat(cnt,cnt2,cnt3,cnt4 , HamRotated->getVmat(listDMRG[cnt],listDMRG[cnt2],listDMRG[cnt3],listDMRG[cnt4]));
-               }
-            }
+            for ( int sum = 0; sum < LAS; sum++ ){ value += two_dm[ cnt1 + LAS * ( sum + LAS * ( cnt2 + LAS * sum ) ) ]; }
+            one_dm[ cnt1 + LAS * cnt2 ] = prefactor * value;
+            one_dm[ cnt2 + LAS * cnt1 ] = one_dm[ cnt1 + LAS * cnt2 ];
          }
       }
    }
 
+   #ifdef CHEMPS2_MPI_COMPILATION
+   MPIchemps2::broadcast_array_double( one_dm, LAS * LAS, MPI_CHEMPS2_MASTER );
+   #endif
+
 }
 
-void CheMPS2::CASSCF::allocateAndFillOCC(int * DOCCin, int * SOCCin){
-   
-   DOCC = new int[numberOfIrreps];
-   SOCC = new int[numberOfIrreps];
-   
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){
-      DOCC[cnt] = DOCCin[cnt];
-      SOCC[cnt] = SOCCin[cnt];
-   }
-   
-   cout << "Norb = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << OrbPerIrrep[cnt] << " , "; }
-   cout << OrbPerIrrep[numberOfIrreps-1] << " ]" << endl;
-   cout << "DOCC = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << DOCC[cnt] << " , "; }
-   cout << DOCC[numberOfIrreps-1] << " ]" << endl;
-   cout << "SOCC = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << SOCC[cnt] << " , "; }
-   cout << SOCC[numberOfIrreps-1] << " ]" << endl;
-   
-}
+void CheMPS2::CASSCF::fillLocalizedOrbitalRotations( DMRGSCFunitary * umat, DMRGSCFindices * idx, double * eigenvecs ){
 
-void CheMPS2::CASSCF::allocateAndFillOCC(const string filename){
+   const int n_irreps = idx->getNirreps();
+   const int tot_dmrg = idx->getDMRGcumulative( n_irreps );
+   const int size = tot_dmrg * tot_dmrg;
 
-   string line, part;
-   int pos, pos2;
-   
-   ifstream inputfile(filename.c_str());
-   
-   //First go to the start of the integral dump.
-   bool stop = false;
-   string start = "****  Molecular Integrals For CheMPS Start Here";
-   do{
-      getline(inputfile,line);
-      pos = line.find(start);
-      if (pos==0) stop = true;
-   } while (!stop);
-   
-   //Get the group name and convert it to the group number
-   getline(inputfile,line);
-   getline(inputfile,line);
-   getline(inputfile,line);
-   getline(inputfile,line);
-   getline(inputfile,line);
-   getline(inputfile,line);
-   DOCC = new int[numberOfIrreps];
-   SOCC = new int[numberOfIrreps];
-   
-   //Doubly occupied orbitals
-   getline(inputfile,line);
-   
-   pos = line.find("=") + 3;
-   pos2 = line.find(" ",pos);
-   part = line.substr(pos, pos2-pos);
-   
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){
-      DOCC[cnt] = atoi(part.c_str());
-      pos = pos2 + 2;
-      pos2 = line.find(" ",pos);
-      part = line.substr(pos,pos2-pos);
-   }
-   DOCC[numberOfIrreps-1] = atoi(part.c_str());
-   
-   //Singly occupied orbitals
-   getline(inputfile,line);
-   
-   pos = line.find("=") + 3;
-   pos2 = line.find(" ",pos);
-   part = line.substr(pos, pos2-pos);
-   
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){
-      SOCC[cnt] = atoi(part.c_str());
-      pos = pos2 + 2;
-      pos2 = line.find(" ",pos);
-      part = line.substr(pos,pos2-pos);
-   }
-   SOCC[numberOfIrreps-1] = atoi(part.c_str());
-   
-   cout << "Norb = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << OrbPerIrrep[cnt] << " , "; }
-   cout << OrbPerIrrep[numberOfIrreps-1] << " ]" << endl;
-   cout << "DOCC = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << DOCC[cnt] << " , "; }
-   cout << DOCC[numberOfIrreps-1] << " ]" << endl;
-   cout << "SOCC = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << SOCC[cnt] << " , "; }
-   cout << SOCC[numberOfIrreps-1] << " ]" << endl;
-   
-   inputfile.close();
-   
-}
-
-void CheMPS2::CASSCF::setupStart(int * NoccIn, int * NDMRGIn, int * NvirtIn){
-
-   setupStartCalled = true;
-
-   //Copy the partitioning
-   Nocc  = new int[numberOfIrreps];
-   NDMRG = new int[numberOfIrreps];
-   Nvirt = new int[numberOfIrreps];
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){
-   
-      if ((NoccIn[cnt]<0) || (NDMRGIn[cnt]<0) || (NvirtIn[cnt]<0)){ cout << "One of the entries for the setup was smaller than zero." << endl; }
-      if (NoccIn[cnt] + NDMRGIn[cnt] + NvirtIn[cnt] != OrbPerIrrep[cnt]){ cout << "The sum of the partition for the setup doesn't match the number of orbitals." << endl; }
-      
-      Nocc[cnt] = NoccIn[cnt];
-      NDMRG[cnt] = NDMRGIn[cnt];
-      Nvirt[cnt] = NvirtIn[cnt];
-   
-   }
-   
-   //Number of orbitals for DMRG, their irrep, and their number in terms of the original Hamiltonian
-   nOrbDMRG = 0;
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){ nOrbDMRG += NDMRG[cnt]; }
-   irrepOfEachDMRGOrbital = new int[nOrbDMRG];
-   listDMRG = new int[nOrbDMRG];
+   for ( int cnt = 0; cnt < size; cnt++ ){ eigenvecs[ cnt ] = 0.0; }
    int passed = 0;
-   int passed2 = 0;
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){
-      for (int cnt2=0; cnt2<NDMRG[cnt]; cnt2++){
-         irrepOfEachDMRGOrbital[passed+cnt2] = cnt;
-         listDMRG[passed+cnt2] = passed2 + Nocc[cnt] + cnt2;
-      }
-      passed += NDMRG[cnt];
-      passed2 += OrbPerIrrep[cnt];
-   }
-   
-   //How many and which orbitals are condensed now.
-   nCondensed = 0;
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){ nCondensed += Nocc[cnt]; }
-   listCondensed = new int[nCondensed];
-   passed = 0;
-   int irrep = 0;
-   int counter = 0;
-   for (int cnt=0; cnt<L; cnt++){
-      if (cnt-passed < Nocc[irrep]){
-         listCondensed[counter] = cnt;
-         counter++;
-      }
-      if ((cnt-passed == OrbPerIrrep[irrep]-1) && (irrep<numberOfIrreps-1)){
-         passed += OrbPerIrrep[irrep];
-         irrep++;
-      }
-   }
-   
-   //Allocate the xmatrix
-   x_linearlength = 0;
-   xmatrix = new double**[numberOfIrreps];
-   for (int irrep=0; irrep<numberOfIrreps; irrep++){
-      xmatrix[irrep] = new double*[3];
-      for (int case_=0; case_<3; case_++){
-         int size = 0;
-         if (case_==0){ size = Nocc[irrep] * NDMRG[irrep]; }
-         if (case_==1){ size = NDMRG[irrep] * Nvirt[irrep]; }
-         if (case_==2){ size = Nocc[irrep] * Nvirt[irrep]; }
-         xmatrix[irrep][case_] = new double[size];
-         for (int cnt=0; cnt<size; cnt++){ xmatrix[irrep][case_][cnt] = 0.0; }
-         x_linearlength += size;
-      }
-   }
-   
-   //Allocate the unitary
-   unitary = new double*[numberOfIrreps];
-   for (int irrep=0; irrep<numberOfIrreps; irrep++){
-      int size = OrbPerIrrep[irrep] * OrbPerIrrep[irrep];
-      unitary[irrep] = new double[size];
-      for (int cnt=0; cnt<size; cnt++){ unitary[irrep][cnt] = 0.0; }
-      for (int cnt=0; cnt<OrbPerIrrep[irrep]; cnt++){ unitary[irrep][cnt*(1+OrbPerIrrep[irrep])] = 1.0; }
-   }
-   
-   //Allocate jumpsHamOrig
-   jumpsHamOrig = new int[numberOfIrreps+1];
-   jumpsHamOrig[0] = 0;
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){ jumpsHamOrig[cnt+1] = jumpsHamOrig[cnt] + OrbPerIrrep[cnt]; }
-   
-   //Allocate space for the DMRG 1DM
-   DMRG1DM = new double[nOrbDMRG * nOrbDMRG];
-   
-   //Find the corresponding indices
-   x_firstindex = new int[x_linearlength];
-   x_secondindex = new int[x_linearlength];
-   x_linearlength = 0;
-   for (int irrep=0; irrep<numberOfIrreps; irrep++){
-      for (int case_=0; case_<3; case_++){
-         if (case_==0){
-            for (int cntOcc=0; cntOcc<Nocc[irrep]; cntOcc++){
-               for (int cntDMRG=0; cntDMRG<NDMRG[irrep]; cntDMRG++){ //DMRG is the row index, hence fast moving one
-                  x_firstindex[x_linearlength] = jumpsHamOrig[irrep] + Nocc[irrep] + cntDMRG;
-                  x_secondindex[x_linearlength] = jumpsHamOrig[irrep] + cntOcc;
-                  x_linearlength++;
-               }
+   for ( int irrep = 0; irrep < n_irreps; irrep++ ){
+
+      const int NDMRG = idx->getNDMRG( irrep );
+      if ( NDMRG > 0 ){
+
+         double * Ublock = umat->getBlock( irrep );
+         double * Eblock = eigenvecs + passed * ( 1 + tot_dmrg );
+
+         for ( int row = 0; row < NDMRG; row++ ){
+            for ( int col = 0; col < NDMRG; col++ ){
+               Eblock[ row + tot_dmrg * col ] = Ublock[ col + NDMRG * row ]; //Eigs = Unit^T
             }
          }
-         if (case_==1){
-            for (int cntDMRG=0; cntDMRG<NDMRG[irrep]; cntDMRG++){
-               for (int cntVirt=0; cntVirt<Nvirt[irrep]; cntVirt++){ //Virt is the row index, hence fast moving one
-                  x_firstindex[x_linearlength] = jumpsHamOrig[irrep] + Nocc[irrep] + NDMRG[irrep] + cntVirt;
-                  x_secondindex[x_linearlength] = jumpsHamOrig[irrep] + Nocc[irrep] + cntDMRG;
-                  x_linearlength++;
-               }
-            }
-         }
-         if (case_==2){
-            for (int cntOcc=0; cntOcc<Nocc[irrep]; cntOcc++){
-               for (int cntVirt=0; cntVirt<Nvirt[irrep]; cntVirt++){ //Virt is the row index, hence fast moving one
-                  x_firstindex[x_linearlength] = jumpsHamOrig[irrep] + Nocc[irrep] + NDMRG[irrep] + cntVirt;
-                  x_secondindex[x_linearlength] = jumpsHamOrig[irrep] + cntOcc;
-                  x_linearlength++;
-               }
-            }
-         }
+
       }
+
+      passed += NDMRG;
+
    }
-   
-   //To calculate the F-matrix elements only once, and to store them for future access
-   Fmatrix = new double*[numberOfIrreps];
-   for (int cnt=0; cnt<numberOfIrreps; cnt++){
-      Fmatrix[cnt] = new double[OrbPerIrrep[cnt] * OrbPerIrrep[cnt]];
-      for (int cnt2=0; cnt2<OrbPerIrrep[cnt] * OrbPerIrrep[cnt]; cnt2++){ Fmatrix[cnt][cnt2] = 0.0; }
-   }
-   
-   //Print what we have just set up.
-   cout << "Nocc  = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << Nocc[cnt] << " , "; }
-   cout << Nocc[numberOfIrreps-1] << " ]" << endl;
-   
-   cout << "Ndmrg = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << NDMRG[cnt] << " , "; }
-   cout << NDMRG[numberOfIrreps-1] << " ]" << endl;
-   
-   cout << "Nvirt = [ ";
-   for (int cnt=0; cnt<numberOfIrreps-1; cnt++){ cout << Nvirt[cnt] << " , "; }
-   cout << Nvirt[numberOfIrreps-1] << " ]" << endl;
-   
-   cout << "Condensed orbitals = [ ";
-   for (int cnt=0; cnt<nCondensed-1; cnt++){ cout << listCondensed[cnt] << " , "; }
-   cout << listCondensed[nCondensed-1] << " ]" << endl;
-      
-   cout << "DMRG orbital irreps = [ ";
-   for (int cnt=0; cnt<nOrbDMRG-1; cnt++){ cout << irrepOfEachDMRGOrbital[cnt] << " , "; }
-   cout << irrepOfEachDMRGOrbital[nOrbDMRG-1] << " ]" << endl;
-      
-   cout << "DMRG orbital numbers = [ ";
-   for (int cnt=0; cnt<nOrbDMRG-1; cnt++){ cout << listDMRG[cnt] << " , "; }
-   cout << listDMRG[nOrbDMRG-1] << " ]" << endl;
-   
-   cout << "Number of variables in the x-matrix = " << x_linearlength << endl;
 
 }
+
+void CheMPS2::CASSCF::rotateOldToNew( DMRGSCFmatrix * myMatrix ){
+
+   for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+
+      int NORB = iHandler->getNORB( irrep );
+      if ( NORB > 0 ){
+         double * Umat = unitary->getBlock( irrep );
+         double * work = theQmatWORK->getBlock( irrep );
+         double * block = myMatrix->getBlock( irrep );
+         double one = 1.0;
+         double set = 0.0;
+         char trans   = 'T';
+         char notrans = 'N';
+         dgemm_( &notrans, &notrans, &NORB, &NORB, &NORB, &one, Umat, &NORB, block, &NORB, &set, work,  &NORB );
+         dgemm_( &notrans, &trans,   &NORB, &NORB, &NORB, &one, work, &NORB, Umat,  &NORB, &set, block, &NORB );
+      }
+   }
+
+}
+
+void CheMPS2::CASSCF::constructCoulombAndExchangeMatrixInOrigIndices( DMRGSCFmatrix * density, DMRGSCFmatrix * result ){
+
+  for ( int irrepQ = 0; irrepQ < num_irreps; irrepQ++ ){
+
+      const int linearsizeQ = iHandler->getNORB( irrepQ );
+      const int triangsizeQ = ( linearsizeQ * ( linearsizeQ + 1 ) ) / 2;
+      int myindices[ 2 ];
+
+      #pragma omp parallel for schedule(static)
+      for ( int combinedindex = 0; combinedindex < triangsizeQ; combinedindex++ ){
+
+         Special::invert_triangle_two( combinedindex, myindices );
+         const int rowQ = myindices[ 0 ];
+         const int colQ = myindices[ 1 ];
+
+         double value = 0.0;
+
+         for ( int irrepN = 0; irrepN < num_irreps; irrepN++ ){
+            const int linearsizeN = iHandler->getNORB( irrepN );
+            for ( int rowN = 0; rowN < linearsizeN; rowN++ ){
+
+               value += density->get( irrepN, rowN, rowN ) * ( VMAT_ORIG->get( irrepQ, irrepN, irrepQ, irrepN, rowQ, rowN, colQ, rowN )
+                                                       - 0.5 * VMAT_ORIG->get( irrepQ, irrepQ, irrepN, irrepN, rowQ, colQ, rowN, rowN ) );
+
+               for ( int colN = rowN + 1; colN < linearsizeN; colN++ ){
+
+                  value += density->get( irrepN, rowN, colN ) * ( 2 * VMAT_ORIG->get( irrepQ, irrepN, irrepQ, irrepN, rowQ, rowN, colQ, colN )
+                                                              - 0.5 * VMAT_ORIG->get( irrepQ, irrepQ, irrepN, irrepN, rowQ, colQ, rowN, colN )
+                                                              - 0.5 * VMAT_ORIG->get( irrepQ, irrepQ, irrepN, irrepN, rowQ, colQ, colN, rowN ) );
+
+               }
+            }
+         }
+
+         result->set( irrepQ, rowQ, colQ, value );
+         result->set( irrepQ, colQ, rowQ, value );
+
+      }
+   }
+
+}
+
+void CheMPS2::CASSCF::buildQmatOCC(){
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+      const bool am_i_master = ( MPIchemps2::mpi_rank() == MPI_CHEMPS2_MASTER );
+   #else
+      const bool am_i_master = true;
+   #endif
+
+   if ( am_i_master ){
+      for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+
+         int NORB = iHandler->getNORB( irrep );
+         if ( NORB > 0 ){
+            int NOCC = iHandler->getNOCC( irrep );
+            double two = 2.0;
+            double set = 0.0;
+            char trans   = 'T';
+            char notrans = 'N';
+            double * Umat = unitary->getBlock( irrep );
+            double * work = theQmatWORK->getBlock( irrep );
+            dgemm_( &trans, &notrans, &NORB, &NORB, &NOCC, &two, Umat, &NORB, Umat, &NORB, &set, work, &NORB );
+         }
+      }
+      constructCoulombAndExchangeMatrixInOrigIndices( theQmatWORK, theQmatOCC );
+      rotateOldToNew( theQmatOCC );
+   }
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+   theQmatOCC->broadcast( MPI_CHEMPS2_MASTER );
+   #endif
+
+}
+
+void CheMPS2::CASSCF::buildQmatACT(){
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+      const bool am_i_master = ( MPIchemps2::mpi_rank() == MPI_CHEMPS2_MASTER );
+   #else
+      const bool am_i_master = true;
+   #endif
+
+   if ( am_i_master ){
+      for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+
+         int NORB = iHandler->getNORB( irrep );
+         if ( NORB > 0 ){
+            int NACT = iHandler->getNDMRG( irrep );
+            double one = 1.0;
+            double set = 0.0;
+            char trans   = 'T';
+            char notrans = 'N';
+            double * Umat  =     unitary->getBlock( irrep ) + iHandler->getNOCC( irrep );
+            double * work  = theQmatWORK->getBlock( irrep );
+            double * work2 =  theQmatACT->getBlock( irrep );
+            double * RDM = DMRG1DM + iHandler->getDMRGcumulative( irrep ) * ( 1 + nOrbDMRG );
+            dgemm_( &trans,   &notrans, &NORB, &NACT, &NACT, &one, Umat,  &NORB, RDM,  &nOrbDMRG, &set, work2, &NORB );
+            dgemm_( &notrans, &notrans, &NORB, &NORB, &NACT, &one, work2, &NORB, Umat, &NORB,     &set, work,  &NORB );
+         }
+      }
+      constructCoulombAndExchangeMatrixInOrigIndices( theQmatWORK, theQmatACT );
+      rotateOldToNew( theQmatACT );
+   }
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+   theQmatACT->broadcast( MPI_CHEMPS2_MASTER );
+   #endif
+
+}
+
+void CheMPS2::CASSCF::buildTmatrix(){
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+      const bool am_i_master = ( MPIchemps2::mpi_rank() == MPI_CHEMPS2_MASTER );
+   #else
+      const bool am_i_master = true;
+   #endif
+
+   if ( am_i_master ){
+      for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+         const int NumORB = iHandler->getNORB( irrep );
+         for ( int row = 0; row < NumORB; row++ ){
+            for ( int col = 0; col < NumORB; col++ ){
+               theTmatrix->set( irrep, row, col, TMAT_ORIG->get( irrep, row, col ) );
+            }
+         }
+      }
+      rotateOldToNew( theTmatrix );
+   }
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+   theTmatrix->broadcast( MPI_CHEMPS2_MASTER );
+   #endif
+
+}
+
+void CheMPS2::CASSCF::fillConstAndTmatDMRG( Hamiltonian * HamDMRG ) const{
+
+   //Constant part of the energy
+   double constant = NUCL_ORIG;
+   for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+      const int NOCC = iHandler->getNOCC( irrep );
+      for ( int occ = 0; occ < NOCC; occ++ ){
+         constant += ( 2 * theTmatrix->get( irrep, occ, occ )
+                         + theQmatOCC->get( irrep, occ, occ ) );
+      }
+   }
+   HamDMRG->setEconst( constant );
+
+   //One-body terms: diagonal in the irreps
+   for ( int irrep = 0; irrep < num_irreps; irrep++ ){
+      const int JUMP = iHandler->getDMRGcumulative( irrep );
+      const int NACT = iHandler->getNDMRG( irrep );
+      const int NOCC = iHandler->getNOCC( irrep );
+      for ( int cnt1 = 0; cnt1 < NACT; cnt1++ ){
+         for ( int cnt2 = cnt1; cnt2 < NACT; cnt2++ ){
+            HamDMRG->setTmat( JUMP + cnt1, JUMP + cnt2, ( theTmatrix->get( irrep, NOCC + cnt1, NOCC + cnt2 )
+                                                        + theQmatOCC->get( irrep, NOCC + cnt1, NOCC + cnt2 ) ) );
+         }
+      }
+   }
+
+}
+
+void CheMPS2::CASSCF::copy_active( double * origin, DMRGSCFmatrix * result, const DMRGSCFindices * idx, const bool one_rdm ){
+
+   result->clear();
+
+   const int n_irreps = idx->getNirreps();
+   const int tot_dmrg = idx->getDMRGcumulative( n_irreps );
+
+   int passed = 0;
+   for ( int irrep = 0; irrep < n_irreps; irrep++ ){
+
+      const int NOCC = idx->getNOCC( irrep );
+      const int NACT = idx->getNDMRG( irrep );
+
+      if ( one_rdm ){
+         for ( int orb = 0; orb < NOCC; orb++ ){
+            result->set( irrep, orb, orb, 2.0 );
+         }
+      }
+
+      for ( int row = 0; row < NACT; row++ ){
+         for ( int col = 0; col < NACT; col++ ){
+            result->set( irrep, NOCC + row, NOCC + col, origin[ passed + row + tot_dmrg * ( passed + col ) ] );
+         }
+      }
+
+      passed += NACT;
+   }
+
+   assert( passed == tot_dmrg );
+
+}
+
+void CheMPS2::CASSCF::copy_active( const DMRGSCFmatrix * origin, double * result, const DMRGSCFindices * idx ){
+
+   const int n_irreps = idx->getNirreps();
+   const int tot_dmrg = idx->getDMRGcumulative( n_irreps );
+
+   for ( int cnt = 0; cnt < tot_dmrg * tot_dmrg; cnt++ ){ result[ cnt ] = 0.0; }
+
+   int passed = 0;
+   for ( int irrep = 0; irrep < n_irreps; irrep++ ){
+
+      const int NOCC = idx->getNOCC( irrep );
+      const int NACT = idx->getNDMRG( irrep );
+
+      for ( int row = 0; row < NACT; row++ ){
+         for ( int col = 0; col < NACT; col++ ){
+            result[ passed + row + tot_dmrg * ( passed + col ) ] = origin->get( irrep, NOCC + row, NOCC + col );
+         }
+      }
+
+      passed += NACT;
+   }
+
+   assert( passed == tot_dmrg );
+
+}
+
+void CheMPS2::CASSCF::block_diagonalize( const char space, const DMRGSCFmatrix * Mat, DMRGSCFunitary * Umat, double * work1, double * work2, const DMRGSCFindices * idx, const bool invert, double * two_dm, double * three_dm, double * contract ){
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+      const bool am_i_master = ( MPIchemps2::mpi_rank() == MPI_CHEMPS2_MASTER );
+   #else
+      const bool am_i_master = true;
+   #endif
+
+   const int n_irreps = idx->getNirreps();
+   const int tot_dmrg = idx->getDMRGcumulative( n_irreps );
+
+   if ( am_i_master ){
+
+      for ( int irrep = 0; irrep < n_irreps; irrep++ ){
+
+         int NTOTAL  = idx->getNORB( irrep );
+         int NROTATE = (( space == 'O' ) ? idx->getNOCC( irrep ) : (( space == 'A' ) ? idx->getNDMRG( irrep ) : idx->getNVIRT( irrep )));
+         int NSHIFT  = (( space == 'O' ) ? 0                     : (( space == 'A' ) ? idx->getNOCC( irrep )  : NTOTAL - NROTATE      ));
+         int NJUMP   = idx->getDMRGcumulative( irrep );
+         if ( NROTATE > 1 ){
+
+            // Diagonalize the relevant block of Mat
+            {
+               for ( int row = 0; row < NROTATE; row++ ){
+                  for ( int col = 0; col < NROTATE; col++ ){
+                     work1[ row + NROTATE * col ] = Mat->get( irrep, NSHIFT + row, NSHIFT + col );
+                  }
+               }
+               char jobz = 'V';
+               char uplo = 'U';
+               int info;
+               int size = max( 3 * NROTATE - 1, NROTATE * NROTATE );
+               dsyev_( &jobz, &uplo, &NROTATE, work1, &NROTATE, work2 + size, work2, &size, &info );
+            }
+
+            // Invert the order (large to small)
+            if ( invert ){
+               for ( int col = 0; col < NROTATE / 2; col++ ){
+                  for ( int row = 0; row < NROTATE; row++ ){
+                     const double temp = work1[ row + NROTATE * ( NROTATE - 1 - col ) ];
+                     work1[ row + NROTATE * ( NROTATE - 1 - col ) ] = work1[ row + NROTATE * col ];
+                     work1[ row + NROTATE * col ] = temp;
+                  }
+               }
+            }
+
+            // Adjust the u-matrix accordingly
+            double * umatrix = Umat->getBlock( irrep ) + NSHIFT;
+            for ( int row = 0; row < NROTATE; row++ ){
+               for ( int col = 0; col < NTOTAL; col++ ){
+                  work2[ row + NROTATE * col ] = umatrix[ row + NTOTAL * col ];
+               }
+            }
+            char trans   = 'T';
+            char notrans = 'N';
+            double one = 1.0;
+            double set = 0.0;
+            dgemm_( &trans, &notrans, &NROTATE, &NTOTAL, &NROTATE, &one, work1, &NROTATE, work2, &NROTATE, &set, umatrix, &NTOTAL );
+
+            // Adjust the two_dm, three_dm, and contract objects accordingly
+            if ( space == 'A' ){
+               if (   two_dm != NULL ){ rotate_active_space_object( 4,   two_dm, work2, work1, tot_dmrg, NJUMP, NROTATE ); }
+               if ( three_dm != NULL ){ rotate_active_space_object( 6, three_dm, work2, work1, tot_dmrg, NJUMP, NROTATE ); }
+               if ( contract != NULL ){ rotate_active_space_object( 6, contract, work2, work1, tot_dmrg, NJUMP, NROTATE ); }
+            }
+         }
+      }
+   }
+
+   #ifdef CHEMPS2_MPI_COMPILATION
+   Umat->broadcast( MPI_CHEMPS2_MASTER );
+   if ( space == 'A' ){
+      if (   two_dm != NULL ){ MPIchemps2::broadcast_array_double(   two_dm, tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg,                       MPI_CHEMPS2_MASTER ); }
+      if ( three_dm != NULL ){ MPIchemps2::broadcast_array_double( three_dm, tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg, MPI_CHEMPS2_MASTER ); }
+      if ( contract != NULL ){ MPIchemps2::broadcast_array_double( contract, tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg * tot_dmrg, MPI_CHEMPS2_MASTER ); }
+   }
+   #endif
+
+}
+
+void CheMPS2::CASSCF::rotate_active_space_object( const int num_indices, double * object, double * work, double * rotation, const int LAS, const int NJUMP, const int NROTATE ){
+
+   assert( num_indices >= 2 );
+   assert( num_indices <= 6 );
+
+   int power[] = { 1,
+                   LAS,
+                   LAS * LAS,
+                   LAS * LAS * LAS,
+                   LAS * LAS * LAS * LAS,
+                   LAS * LAS * LAS * LAS * LAS,
+                   LAS * LAS * LAS * LAS * LAS * LAS };
+
+   for ( int rot_index = num_indices - 1; rot_index >= 0; rot_index-- ){
+      for ( int block = 0; block < power[ num_indices - 1 - rot_index ]; block++ ){
+         double * mat = object + power[ rot_index ] * NJUMP + power[ rot_index + 1 ] * block;
+         int ROTDIM = NROTATE;
+         char notrans = 'N';
+         double one = 1.0;
+         double set = 0.0;
+         dgemm_( &notrans, &notrans, power + rot_index, &ROTDIM, &ROTDIM, &one, mat, power + rot_index, rotation, &ROTDIM, &set, work, power + rot_index );
+         int size = power[ rot_index ] * NROTATE;
+         int inc1 = 1;
+         dcopy_( &size, work, &inc1, mat, &inc1 );
+      }
+   }
+
+}
+
 
